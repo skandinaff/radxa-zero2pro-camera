@@ -427,6 +427,9 @@ dma_error dma_writer_pipe_update( dma_pipe *pipe , bool drop_frame)
                     empty_frame->primary.height = pipe->api.p_acamera_isp_dma_writer_active_height_read( pipe->settings.isp_base );
                     empty_frame->primary.line_offset = acamera_line_offset( empty_frame->primary.width, _get_pixel_width( empty_frame->primary.type ) );
                     uint32_t frame_size = empty_frame->primary.line_offset * empty_frame->primary.height;
+                    LOG( LOG_CRIT, "TRACE dma_writer: active %ux%u type=%u line_offset=%u frame_size=%u buf_size=%u",
+                        empty_frame->primary.width, empty_frame->primary.height, empty_frame->primary.type,
+                        empty_frame->primary.line_offset, frame_size, empty_frame->primary.size );
                     addr = empty_frame->primary.address;
                     pipe->settings.inqueue_tframe[1] = empty_frame;
                     LOG( LOG_DEBUG, "next dma addr:0x%lx\n", addr );

@@ -283,8 +283,9 @@ int fw_intf_stream_start( isp_v4l2_stream_type_t streamType )
     }
 #endif
     if (streamType == V4L2_STREAM_TYPE_FR) {
-        LOG( LOG_ERR, "Starting stream type %d", streamType );
+        LOG( LOG_CRIT, "TRACE fw_intf_stream_start: about to acamera_command(SENSOR_STREAMING, ON)" );
         acamera_command( TSENSOR, SENSOR_STREAMING, ON, COMMAND_SET, &rc );
+        LOG( LOG_CRIT, "TRACE fw_intf_stream_start: acamera_command(SENSOR_STREAMING, ON) returned, rc = %u", rc );
     }
 
 #if ISP_HAS_DS2
