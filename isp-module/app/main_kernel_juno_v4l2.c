@@ -41,6 +41,7 @@
 #include "system_hw_io.h"
 #include "system_sw_io.h"
 #include "system_am_sc.h"
+#include "system_am_mipi.h"
 #include <linux/fs.h>
 #include <asm/uaccess.h>
 #include <asm/unaligned.h>
@@ -63,6 +64,7 @@ struct device_info {
     struct clk* clk_isp_0;
     struct clk* clk_mipi_0;
     struct device_node *am_sc;
+    struct device_node *am_mipi;
 };
 
 extern uint8_t *isp_kaddr;
@@ -117,6 +119,35 @@ void *acamera_camera_v4l2_get_subdev_by_name( const char *name )
         }
     }
     LOG( LOG_ERR, "Return subdev pointer 0x%x", result );
+    return result;
+}
+
+/*
+ * radxa-zero2pro-camera: match on a name prefix.
+ *
+ * The exact-match lookup above only works for the vendor shim subdevs, which
+ * register under fixed names ("SocSensor", "SocCalibrations"). A subdev
+ * instantiated from an i2c client is named "<driver> <adapter>-<addr>" by
+ * v4l2_i2c_subdev_init() -- "imx415 3-001a" here -- so the bus topology is
+ * baked into the name and an exact match can never find it.
+ */
+void *acamera_camera_v4l2_get_subdev_by_prefix( const char *prefix )
+{
+    int idx = 0;
+    void *result = NULL;
+    size_t len = strlen( prefix );
+
+    for ( idx = 0; idx < V4L2_SOC_SUBDEV_NUMBER; idx++ ) {
+        if ( g_subdevs.soc_subdevs[idx] &&
+             strncmp( g_subdevs.soc_subdevs[idx]->name, prefix, len ) == 0 ) {
+            result = g_subdevs.soc_subdevs[idx];
+            LOG( LOG_ERR, "Matched subdev '%s' for prefix '%s'",
+                 g_subdevs.soc_subdevs[idx]->name, prefix );
+            break;
+        }
+    }
+    if ( result == NULL )
+        LOG( LOG_ERR, "No subdev matching prefix '%s'", prefix );
     return result;
 }
 
@@ -660,6 +691,30 @@ static int32_t isp_platform_probe( struct platform_device *pdev )
     } else {
         LOG( LOG_ERR,"Success to get link device: %s\n", dev_info.am_sc->name);
         am_sc_parse_dt(dev_info.am_sc);
+    }
+
+    /*
+     * radxa-zero2pro-camera: bring up the CSI-2 receive path.
+     *
+     * am_mipi_parse_dt() is what maps the CSI-2 PHY registers and populates
+     * the g_mipi/g_adap globals that am_mipi_init()/am_adap_init() then use;
+     * it also chains into am_adap_parse_dt() via the phy-csi node's
+     * "link-device" phandle. Neither file registers a platform driver of its
+     * own -- in the vendor tree the sensor module called this from its own
+     * i2c probe (system_i2c.c), which is code this port does not have. Without
+     * it g_mipi stays NULL and the first am_mipi_init() from the sensor bridge
+     * dereferences it.
+     *
+     * Located by compatible rather than a phandle from this node: the ISP
+     * node's "link-device" is already taken by the super-scaler above.
+     */
+    dev_info.am_mipi = of_find_compatible_node( NULL, NULL, "amlogic, phy-csi" );
+    if ( dev_info.am_mipi == NULL ) {
+        LOG( LOG_ERR, "Failed to find phy-csi node; CSI receive path will be down\n" );
+    } else {
+        LOG( LOG_ERR, "Success to get phy-csi node: %s\n", dev_info.am_mipi->name );
+        if ( am_mipi_parse_dt( dev_info.am_mipi ) != 0 )
+            LOG( LOG_ERR, "am_mipi_parse_dt failed; CSI receive path will be down\n" );
     }
 
     dev_info.clk_isp_0 = devm_clk_get(&pdev->dev, "cts_mipi_isp_clk_composite");

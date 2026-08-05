@@ -837,6 +837,16 @@ int isp_v4l2_create_instance( struct v4l2_device *v4l2_dev, struct platform_devi
      * rename, same enum position/value, checked v4l2-dev.h). */
     vfd->vfl_type = VFL_TYPE_VIDEO;
 
+    /* 4.9->6.1 port: device_caps on the video_device is now mandatory.
+     * v4l2-dev.c does
+     *     WARN_ON(type != VFL_TYPE_SUBDEV && !vdev->device_caps)
+     * and fails registration with -EINVAL, because the core answers
+     * VIDIOC_QUERYCAP's device_caps from here now instead of leaving it
+     * entirely to the driver's vidioc_querycap. Must match what
+     * isp_v4l2_querycap() reports. */
+    vfd->device_caps = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING |
+                       V4L2_CAP_READWRITE;
+
     /*
      * Provide a mutex to v4l2 core. It will be used to protect
      * all fops and v4l2 ioctls.

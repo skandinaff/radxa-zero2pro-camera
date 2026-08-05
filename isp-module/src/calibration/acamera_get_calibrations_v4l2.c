@@ -57,28 +57,28 @@ extern uint32_t get_calibrations_dynamic_linear_dummy( ACameraCalibrations *c );
 uint32_t get_calibrations_v4l2( uint32_t ctx_id, void *sensor_arg, ACameraCalibrations *c )
 {
     uint32_t ret = 0;
-    int32_t preset;
+    int32_t preset = WDR_MODE_LINEAR;
 
-    if ( !sensor_arg ) {
-        LOG( LOG_CRIT, "calibration sensor_arg is NULL" );
-        return 0;
-    }
+    /* There is no failure path here on purpose. Returning an empty set leaves
+     * the LUT pointers NULL, and _GET_LUT_PTR() responds to a NULL LUT by
+     * spinning forever, which wedges the loading process in uninterruptible
+     * sleep. Whatever happens, hand back a complete set.
+     *
+     * sensor_arg is NULL when the firmware asks for calibrations before the
+     * sensor FSM has a mode to report -- which it does during init, and always
+     * will if the sensor bridge failed to attach. Linear is the right default:
+     * it is the mode the overlay selects, and the only one the dummy tree has
+     * tables for. */
+    if ( sensor_arg )
+        preset = ( (sensor_mode_t *)sensor_arg )->wdr_mode;
+    else
+        LOG( LOG_CRIT, "calibration sensor_arg is NULL, assuming linear" );
 
-    preset = ( (sensor_mode_t *)sensor_arg )->wdr_mode;
-
-    switch ( preset ) {
-    case WDR_MODE_LINEAR:
-        ret = get_calibrations_dynamic_linear_dummy( c ) +
-              get_calibrations_static_linear_dummy( c );
-        break;
-    default:
-        /* Fall back to linear rather than returning an empty set: an empty
-         * set means NULL LUTs, and a NULL LUT hangs the firmware for good. */
+    if ( preset != WDR_MODE_LINEAR )
         LOG( LOG_CRIT, "No dummy calibration for wdr_mode %d, using linear", (int)preset );
-        ret = get_calibrations_dynamic_linear_dummy( c ) +
-              get_calibrations_static_linear_dummy( c );
-        break;
-    }
+
+    ret = get_calibrations_dynamic_linear_dummy( c ) +
+          get_calibrations_static_linear_dummy( c );
 
     LOG( LOG_CRIT, "Loaded dummy calibrations, ctx_id:%d wdr_mode:%d ret:%d",
          ctx_id, (int)preset, ret );

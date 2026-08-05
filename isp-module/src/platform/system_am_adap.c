@@ -30,9 +30,13 @@
 #include <linux/device.h>
 /* radxa-zero2pro-camera: linux/dma-contiguous.h was removed upstream in
  * v5.10 (commit 0b1abd1fb7e4, "dma-mapping: merge <linux/dma-contiguous.h>
- * into <linux/dma-map-ops.h>"). dma_alloc_from_contiguous() and
- * dma_release_from_contiguous(), which this file uses, now live in
- * <linux/dma-map-ops.h> with unchanged signatures. */
+ * into <linux/dma-map-ops.h>"). The declarations moved there, but
+ * dma_alloc_from_contiguous()/dma_release_from_contiguous() are *not*
+ * EXPORT_SYMBOL'd, so an out-of-tree module cannot link against them:
+ * modpost fails with "dma_alloc_from_contiguous undefined". The supported
+ * module-facing way to get a large physically contiguous buffer is
+ * dma_alloc_coherent(), which routes through CMA internally for
+ * allocations this size. See am_adap_alloc_mem(). */
 #include <linux/dma-map-ops.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
@@ -57,8 +61,24 @@ struct kfifo adapt_fifo;
 
 /*we allocte from CMA*/
 static uint8_t *isp_cma_mem = NULL;
-static struct page *cma_pages = NULL;
 static resource_size_t buffer_start;
+
+/* radxa-zero2pro-camera: was "struct page *cma_pages" from
+ * dma_alloc_from_contiguous(). dma_alloc_coherent() hands back a kernel
+ * virtual address plus a dma_addr_t instead, so keep both: cma_vaddr
+ * doubles as the "is anything allocated?" flag cma_pages used to be. */
+static void *cma_vaddr = NULL;
+static dma_addr_t cma_dma;
+static size_t cma_size;
+
+/* The vendor code called phys_to_virt() on addresses inside the CMA buffer,
+ * which was valid only because dma_alloc_from_contiguous() returns pages out
+ * of the kernel linear map. dma_alloc_coherent() may hand back a separate
+ * non-cacheable vmap instead, so translate through our own base pair. */
+static inline void *adap_buf_virt(resource_size_t phys)
+{
+	return (uint8_t *)cma_vaddr + (phys - buffer_start);
+}
 
 #define DDR_BUF_SIZE 4
 static resource_size_t ddr_buf[DDR_BUF_SIZE];
@@ -357,7 +377,7 @@ static ssize_t adapt_frame_write(struct device *dev,
 		dump_buf_addr = ddr_buf[cur_buf_index];
 		pr_info("dump current buffer index %d.\n", cur_buf_index);
 		if (dump_buf_addr)
-			virt_buf = phys_to_virt(dump_buf_addr);
+			virt_buf = adap_buf_virt(dump_buf_addr);
 		write_index_to_file(parm[0], virt_buf, cur_buf_index, frame_size);
 		dump_cur_flag = 0;
 		current_flag = 0;
@@ -365,7 +385,7 @@ static ssize_t adapt_frame_write(struct device *dev,
 		pr_info("dump the buf_index = %d\n", dump_buf_index);
 		dump_buf_addr = ddr_buf[dump_buf_index];
 		if (dump_buf_addr)
-			virt_buf = phys_to_virt(dump_buf_addr);
+			virt_buf = adap_buf_virt(dump_buf_addr);
 		write_index_to_file(parm[0], virt_buf, dump_buf_index, frame_size);
 		dump_flag = 0;
 	} else {
@@ -432,12 +452,12 @@ static ssize_t dol_frame_write(struct device *dev,
 	dump_buf_addr = dol_buf[(buffer_index - 1) % 2];
 	pr_info("dump ft0/ft1 buffer index %d.\n", buffer_index);
 	if (dump_buf_addr)
-		virt_buf = phys_to_virt(dump_buf_addr);
+		virt_buf = adap_buf_virt(dump_buf_addr);
 	write_index_to_file(parm[0], virt_buf, 0, frame_size);
 
 	dump_buf_addr = dol_buf[(buffer_index - 1)% 2 + 2];
 	if (dump_buf_addr)
-		virt_buf = phys_to_virt(dump_buf_addr);
+		virt_buf = adap_buf_virt(dump_buf_addr);
 	write_index_to_file(parm[0], virt_buf, 1, frame_size);
 
 	dump_dol_frame = 0;
@@ -537,7 +557,7 @@ static ssize_t inject_frame_write(struct device *dev,
 	stride = (frame_width * bit_depth)/8;
 	stride = ((stride + (BOUNDRY - 1)) & (~(BOUNDRY - 1)));
 	if (ddr_buf[DDR_BUF_SIZE - 1] != 0)
-		virt_buf = phys_to_virt(ddr_buf[DDR_BUF_SIZE - 1]);
+		virt_buf = adap_buf_virt(ddr_buf[DDR_BUF_SIZE - 1]);
 	file_size = stride * frame_height;
 	pr_info("inject frame width = %ld, height = %ld, bitdepth = %ld, size = %d\n",
 		frame_width, frame_height,
@@ -602,12 +622,23 @@ int am_adap_parse_dt(struct device_node *node)
 	t_adap->rd_irq = irq;
 	pr_info("%s:rs info: irq: %d\n", __func__, t_adap->rd_irq);
 
+	/* radxa-zero2pro-camera: the vendor code assumed of_find_device_by_node()
+	 * always succeeds and that a reserved-memory region is always attached,
+	 * and dereferenced/bailed accordingly. Neither holds here: the platform
+	 * device only exists if the overlay's node was populated, and DIR_MODE
+	 * (linear, sensor -> adapter -> ISP with no DDR round-trip) never
+	 * allocates from the region at all. Treat both as non-fatal so the
+	 * adapter still comes up for the direct path. */
 	t_adap->p_dev = of_find_device_by_node(node);
-	ret = of_reserved_mem_device_init(&(t_adap->p_dev->dev));
-	if (ret != 0) {
-		pr_err("adapt reserved mem device init failed.\n");
-		return ret;
+	if (t_adap->p_dev == NULL) {
+		pr_err("%s: no platform device for adapter node\n", __func__);
+		goto irq_error;
 	}
+
+	ret = of_reserved_mem_device_init(&(t_adap->p_dev->dev));
+	if (ret != 0)
+		pr_info("no reserved mem for adapter (%d); DDR/DOL modes unavailable\n",
+			ret);
 
 	ret = of_property_read_u32(t_adap->p_dev->dev.of_node, "mem_alloc",
 		&(t_adap->adap_buf_size));
@@ -1161,54 +1192,43 @@ static irqreturn_t dol_isr(int irq, void *para)
 
 int am_adap_alloc_mem(void)
 {
+	/* radxa-zero2pro-camera: dma_alloc_coherent() in place of
+	 * dma_alloc_from_contiguous() -- see the dma-map-ops.h include comment.
+	 * Same physically contiguous buffer, but the API is exported to modules.
+	 * DDR_MODE and DOL_MODE want an identically sized buffer, so the two
+	 * vendor branches collapse into one. */
+	if (para.mode != DDR_MODE && para.mode != DOL_MODE)
+		return 0;
 
-	if (para.mode == DDR_MODE) {
-		cma_pages = dma_alloc_from_contiguous(
-				  &(g_adap->p_dev->dev),
-				  (g_adap->adap_buf_size * SZ_1M) >> PAGE_SHIFT, 0, false);
-		if (cma_pages) {
-			buffer_start = page_to_phys(cma_pages);
-		} else {
-			pr_err("alloc cma pages failed.\n");
-			return 0;
-		}
-		isp_cma_mem = phys_to_virt(buffer_start);
-	} else if (para.mode == DOL_MODE) {
-		cma_pages = dma_alloc_from_contiguous(
-				  &(g_adap->p_dev->dev),
-				  (g_adap->adap_buf_size * SZ_1M) >> PAGE_SHIFT, 0, false);
-		if (cma_pages) {
-			buffer_start = page_to_phys(cma_pages);
-		} else {
-			pr_err("alloc dol cma pages failed.\n");
-			return 0;
-		}
+	cma_size = (size_t)g_adap->adap_buf_size * SZ_1M;
+	cma_vaddr = dma_alloc_coherent(&(g_adap->p_dev->dev), cma_size,
+				       &cma_dma, GFP_KERNEL);
+	if (!cma_vaddr) {
+		pr_err("alloc %s cma buffer failed (%zu bytes).\n",
+		       para.mode == DOL_MODE ? "dol" : "", cma_size);
+		cma_size = 0;
+		return 0;
 	}
+
+	/* No IOMMU in front of the adapter on this SoC, so the dma_addr_t the
+	 * DMA engine is programmed with is the physical address the rest of
+	 * this file expects in buffer_start/ddr_buf[]/dol_buf[]. */
+	buffer_start = (resource_size_t)cma_dma;
+	isp_cma_mem = cma_vaddr;
+
 	return 0;
 }
 
 int am_adap_free_mem(void)
 {
-	if (para.mode == DDR_MODE) {
-		if (cma_pages) {
-			dma_release_from_contiguous(
-				 &(g_adap->p_dev->dev),
-				 cma_pages,
-				 (g_adap->adap_buf_size * SZ_1M) >> PAGE_SHIFT);
-			cma_pages = NULL;
-			buffer_start = 0;
-			pr_info("release alloc CMA buffer.\n");
-		}
-	} else if (para.mode == DOL_MODE) {
-		if (cma_pages) {
-			dma_release_from_contiguous(
-				 &(g_adap->p_dev->dev),
-				 cma_pages,
-				 (g_adap->adap_buf_size * SZ_1M) >> PAGE_SHIFT);
-			cma_pages = NULL;
-			buffer_start = 0;
-			pr_info("release alloc dol CMA buffer.\n");
-		}
+	if (cma_vaddr) {
+		dma_free_coherent(&(g_adap->p_dev->dev), cma_size,
+				  cma_vaddr, cma_dma);
+		cma_vaddr = NULL;
+		cma_size = 0;
+		buffer_start = 0;
+		isp_cma_mem = NULL;
+		pr_info("release alloc CMA buffer.\n");
 	}
 	return 0;
 }
@@ -1240,32 +1260,32 @@ int am_adap_init(void)
 		fte_state = FTE_DONE;
 		init_completion(&wakeupdump);
 	}
-	if (cma_pages) {
+	if (cma_vaddr) {
 		am_adap_free_mem();
-		cma_pages = NULL;
+		cma_vaddr = NULL;
 	}
 
 	if ((para.mode == DDR_MODE) ||
 		(para.mode == DOL_MODE)) {
 		am_adap_alloc_mem();
 		depth = am_adap_get_depth();
-		if ((cma_pages) && (para.mode == DDR_MODE)) {
+		if ((cma_vaddr) && (para.mode == DDR_MODE)) {
 			//note important : ddr_buf[0] and ddr_buf[1] address should alignment 16 byte
 			stride = (para.img.width * depth)/8;
 			stride = ((stride + (BOUNDRY - 1)) & (~(BOUNDRY - 1)));
 			ddr_buf[0] = buffer_start;
 			ddr_buf[0] = (ddr_buf[0] + (PAGE_SIZE - 1)) & (~(PAGE_SIZE - 1));
 			temp_buf = ddr_buf[0];
-			buf = phys_to_virt(ddr_buf[0]);
+			buf = adap_buf_virt(ddr_buf[0]);
 			memset(buf, 0x0, (stride * para.img.height));
 			for (i = 1; i < DDR_BUF_SIZE; i++) {
 				ddr_buf[i] = temp_buf + (stride * (para.img.height));
 				ddr_buf[i] = (ddr_buf[i] + (PAGE_SIZE - 1)) & (~(PAGE_SIZE - 1));
 				temp_buf = ddr_buf[i];
-				buf = phys_to_virt(ddr_buf[i]);
+				buf = adap_buf_virt(ddr_buf[i]);
 				memset(buf, 0x0, (stride * para.img.height));
 			}
-		} else if ((cma_pages) && (para.mode == DOL_MODE)) {
+		} else if ((cma_vaddr) && (para.mode == DOL_MODE)) {
 			dol_buf[0] = buffer_start;
 			dol_buf[0] = (dol_buf[0] + (PAGE_SIZE - 1)) & (~(PAGE_SIZE - 1));
 			temp_buf = dol_buf[0];
