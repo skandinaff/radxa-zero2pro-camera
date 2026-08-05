@@ -35,6 +35,8 @@ FW_SRC_OBJ := app/main_kernel_juno_v4l2.o \
 			  src/platform/system_semaphore.o \
 			  src/platform/system_interrupts.o \
 			  src/platform/system_am_sc.o \
+			  src/platform/system_am_adap.o \
+			  src/platform/system_am_mipi.o \
 			  src/platform/system_hw_io.o \
 			  src/platform/system_spi.o \
 			  src/platform/system_chardev.o \
@@ -115,7 +117,8 @@ FW_SRC_OBJ := app/main_kernel_juno_v4l2.o \
 			  src/fw_lib/color_matrix_intf.o \
 			  src/fw_lib/acamera_sbus_spi.o \
 			  src/calibration/acamera_get_calibrations_v4l2.o \
-			  src/calibration/soc_iq_calibrations.o \
+			  src/calibration/acamera_calibrations_static_linear_dummy.o \
+			  src/calibration/acamera_calibrations_dynamic_linear_dummy.o \
 			  src/driver/sensor/sensor_bus_config.o \
 			  src/driver/sensor/V4L2_drv.o \
 			  src/driver/sensor/ACameraDefault.o \

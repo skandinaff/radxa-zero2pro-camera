@@ -77,7 +77,36 @@ void acamera_fsm_mgr_init(acamera_fsm_mgr_t *p_fsm_mgr)
 
     init_param.p_fsm_mgr = p_fsm_mgr;
     init_param.isp_base = p_fsm_mgr->isp_base;
+
+    /*
+     * The GENERAL FSM must be initialized before the others, not in array
+     * order. FSM_ID_SENSOR is index 0, and sensor_fsm_init() -> sensor_hw_init()
+     * issues FSM_PARAM_SET_WDR_MODE at the manager, which lands in
+     * general_fsm_set_param(). With ISP_WDR_SWITCH=1 that calls
+     * general_set_wdr_mode(), which dereferences ACAMERA_FSM2CTX_PTR(p_fsm) --
+     * i.e. p_fsm->p_fsm_mgr->p_ctx. That back-pointer is only assigned by
+     * general_fsm_init(), which in array order (FSM_ID_GENERAL == 3) has not
+     * run yet, so it is still NULL and the kernel oopses on a NULL+0x10 read.
+     *
+     * The vendor tree gets away with the array order because its in-tree
+     * sensor drivers report a mode whose wdr_mode/exposures already match
+     * general_fsm_clear()'s defaults (WDR_MODE_LINEAR / SENSOR_DEFAULT_EXP_NUM),
+     * so the guard in general_fsm_set_param() short-circuits and
+     * general_set_wdr_mode() is never reached during init. A sensor bridged in
+     * as a generic V4L2 subdev does not necessarily match those defaults.
+     *
+     * Initializing GENERAL first is safe: acamera_fw_init() has already filled
+     * in fsm_mgr.p_ctx / ctx_id / isp_base, and general_initialize() depends on
+     * nothing from the other FSMs. general_initialize() also calls
+     * general_set_wdr_mode() itself, so the vendor's intended sequencing is
+     * preserved.
+     */
+    p_fsm_mgr->fsm_arr[FSM_ID_GENERAL]->ops.init(
+        p_fsm_mgr->fsm_arr[FSM_ID_GENERAL]->p_fsm, &init_param);
+
     for(idx = 0; idx < FSM_ID_MAX; idx++){
+        if (idx == FSM_ID_GENERAL)
+            continue;
         p_fsm_mgr->fsm_arr[idx]->ops.init(p_fsm_mgr->fsm_arr[idx]->p_fsm, &init_param);
 
     }
