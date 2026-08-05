@@ -28,7 +28,16 @@ else
 fi
 
 printf '\n=== v4l2 devices ===\n'
-ls /dev/video* /dev/media* 2>/dev/null | sed 's/^/  /' || printf '  none\n'
+# Note: /dev/video0 is meson-vdec (the hardware video decoder) on a stock
+# board -- it is NOT the camera. The ISP node is the one named isp_v4l2.
+found=0
+for d in /dev/video* /dev/media*; do
+	[ -e "$d" ] || continue
+	found=1
+	drv=$(v4l2-ctl -d "$d" --info 2>/dev/null | awk -F': ' '/Driver name/{print $2}')
+	printf '  %-14s %s\n' "$d" "${drv:-?}"
+done
+[ "$found" = 1 ] || printf '  none\n'
 
 printf '\n=== driver bind status ===\n'
 for d in /sys/bus/platform/drivers/*isp*/ /sys/bus/i2c/drivers/imx415/; do

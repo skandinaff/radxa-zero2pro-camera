@@ -6,16 +6,33 @@
 # Usage: ./scripts/capture.sh [/dev/videoN]
 set -e
 
-DEV=${1:-}
-if [ -z "$DEV" ]; then
-	for d in /dev/video0 /dev/video1 /dev/video2 /dev/video3; do
-		[ -c "$d" ] && { DEV=$d; break; }
-	done
-fi
-[ -n "$DEV" ] || { echo "error: no /dev/video* found -- did the ISP probe?" >&2; exit 1; }
-
 command -v v4l2-ctl >/dev/null || {
 	echo "error: v4l2-ctl missing (sudo apt install v4l-utils)" >&2; exit 1; }
+
+# Do NOT just grab the first /dev/video* -- this board ships /dev/video0 as
+# meson-vdec, the hardware *video decoder*, which has nothing to do with the
+# camera. Select by the name the ISP driver registers (isp-v4l2.c: vfd->name
+# = "isp_v4l2-vid-cap", cap->card = "juno R2").
+DEV=${1:-}
+if [ -z "$DEV" ]; then
+	for d in /dev/video*; do
+		[ -c "$d" ] || continue
+		if v4l2-ctl -d "$d" --info 2>/dev/null | grep -qiE 'isp_v4l2|juno R2'; then
+			DEV=$d; break
+		fi
+	done
+fi
+if [ -z "$DEV" ]; then
+	echo "error: no ISP capture device found -- did iv009_isp probe?" >&2
+	echo "       present video nodes:" >&2
+	for d in /dev/video*; do
+		[ -c "$d" ] || continue
+		printf '         %s: %s\n' "$d" \
+			"$(v4l2-ctl -d "$d" --info 2>/dev/null | awk -F': ' '/Driver name/{print $2}')" >&2
+	done
+	exit 1
+fi
+printf 'using %s\n' "$DEV"
 
 printf '=== %s capabilities ===\n' "$DEV"
 v4l2-ctl -d "$DEV" --all 2>&1 | head -40
