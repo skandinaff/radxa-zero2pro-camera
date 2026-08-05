@@ -22,39 +22,43 @@
  *               dvdd/ovdd/avdd supplies.
  *
  * Hardware facts below are from Radxa's official
- * radxa_zero_2_pro_v1.2_schematic.pdf (pages 9 "CPU I/O" and 13
- * "Panel/CAM/40PIN"), not guessed:
+ * radxa_zero_2_pro_v1.2_schematic.pdf (pages 6 "GPIO", 9 "CPU I/O" and 13
+ * "Panel/CAM/40PIN"), cross-checked against the live board:
  *   - CSI connector (J5002, 31-pin 0.3mm FPC) MIPI_CSI_D0..D3 + CLKA data/
  *     clock lanes wire straight to the A311D's own CSI PHY pins - these
  *     are silicon-fixed, nothing to configure in DT beyond the phy-csi
  *     node itself (already vendor-defined, unchanged).
- *   - CM_MCLK (the connector's sensor clock pin) is wired to ball BF16 =
- *     GPIOAO_10, whose CLK12_24 alt-function is exactly the SoC's
- *     "gen_clk" output - matches the vendor kvim3_linux.dts sensor node's
- *     own `clocks = <&clkc CLKID_GEN_CLK>`. No pinmux overlay needed for
- *     this pin: gen_clk's alt-function routing through GPIOAO_10 is
- *     controlled by the clock's own hardware path, not a separate
- *     pinctrl group (same as how the vendor dts wires it - the sensor
- *     node there only has `pinctrl-0 = <&gen_clk_ee_ao>` for a *different*
- *     board/pin combination; this board's schematic shows CM_MCLK fixed
- *     to GPIOAO_10 with no alternate routing option, so nothing to select).
- *   - CM_I2C_SCL/CM_I2C_SDA (connector pins 24/25) are the *same net* as
- *     the 40-pin header's "I2C7_SDA/SCL" pins (3/5) - confirmed by
- *     decompiling /boot/dtbo/meson-g12-i2c-ee-m3-a.dtbo on the live board:
- *     it targets i2c3 (alias -> /soc/bus@ffd00000/i2c@1c000) on
- *     GPIOA_14/15, and is already status=okay by default (ships enabled,
- *     confirmed live as /dev/i2c-3). No i2c-enable overlay needed.
+ *   - CM_MCLK (J5002 pin 21, "CAM0-CLK") is ball AU36 = GPIOAO_10, and the
+ *     function it needs is the SoC's CLK12_24 output.
  *
- * NOT verified from the schematic (flagged, not guessed): CM_PWRDN_1 /
- * CM_RST_L / CM_FS's exact GPIO ball numbers. imx415.c's reset-gpios is
- * `devm_gpiod_get_optional()` (see imx415.c ~line 1074), so omitting
- * `reset-gpios` here is safe - the driver just skips the reset toggle
- * rather than failing to probe. Whether the sensor needs that toggle to
- * come out of hardware reset on power-up is unverified; if the sensor
- * doesn't respond on i2c-3 (`i2cdetect -y 3` shows no device at 0x1a),
- * this is the first thing to chase down (multimeter continuity from J5002
- * pin 23/26/27 back to a specific GPIOx ball, or physical trial-and-error
- * with gpioset while watching for a response).
+ *     This is NOT gen_clk. gen_clk (GEN_CLK_EE/GEN_CLK_AO) comes out on
+ *     GPIOAO_11 (ball BF16), which this board routes to the *panel*
+ *     connector - it is not connected to the camera at all. An earlier
+ *     revision of this overlay clocked the sensor from gen_clk on the
+ *     assumption that GPIOAO_10's CLK12_24 "was" gen_clk; it can never
+ *     have worked.
+ *
+ *     Mainline's pinctrl-meson-g12a.c has no group for CLK12_24 (on
+ *     GPIOAO_10 it models only cec_ao_a=1, cec_ao_b=2, tdm_ao_b_din1=6),
+ *     so this cannot be selected with pinctrl-0 from DT. The ao_mclk
+ *     module pokes the mux field directly instead; see ao-mclk/ao_mclk.c.
+ *     Verified on hardware: with no MCLK the sensor does not ACK at 0x1a
+ *     for ANY combination of the reset/power-down/frame-sync GPIOs.
+ *   - CM_I2C_SCL/CM_I2C_SDA (connector pins 25/26) are the *same net* as
+ *     the 40-pin header's I2C pins 3/5 -> i2c3
+ *     (/soc/bus@ffd00000/i2c@1c000), already status=okay by default.
+ *     Confirmed live: /dev/i2c-3 maps to ffd1c000.i2c, and its only other
+ *     occupant is fusb302 (USB-C PD) at 0x22 - no clash with the sensor's
+ *     0x1a. No i2c-enable overlay needed.
+ *   - Camera control GPIOs, from schematic page 6 (these were previously
+ *     unknown and are now pinned down):
+ *         CM_RST_L    -> GPIOA_11 (ball G22) -> &gpio line 60, active low
+ *         CM_PWRDN_1  -> GPIOA_10 (ball G25) -> &gpio line 59
+ *         CM_FS       -> GPIOA_6  (ball E15) -> &gpio line 55
+ *     Only reset is wired up below; empirically the sensor enumerates on
+ *     i2c with PWRDN/FS left alone, so they are deliberately not driven.
+ *   - The connector takes fixed VCC3.3V/VCC5V with no software power gate,
+ *     which is why the regulators in fragment@3 are always-on stand-ins.
  */
 
 / {
@@ -85,7 +89,15 @@
 				clocks = <&isp_clkc 0>, <&isp_clkc 1>;
 				clock-names = "cts_mipi_isp_clk_composite",
 					      "cts_mipi_csi_phy_clk0_composite";
-				link-device = <&adapter>;
+				/* Points at the SCALER, not the adapter -
+				 * matches mesong12b.dtsi's isp node
+				 * (`link-device = <&isp_sc>`). Pointing this
+				 * at &adapter makes am_sc_parse_dt() fail its
+				 * of_device_is_compatible(node, "amlogic,
+				 * isp-sc") test with "Error match compatible".
+				 * Only phy-csi below links to &adapter.
+				 */
+				link-device = <&isp_sc>;
 				status = "okay";
 
 				port {
@@ -95,11 +107,25 @@
 				};
 			};
 
+			/* Scaler block, verbatim from mesong12b.dtsi. Parsed by
+			 * system_am_sc.c via the isp node's link-device phandle;
+			 * it is not a platform driver of its own, so it needs no
+			 * compatible match in any module - just the node.
+			 */
+			isp_sc: isp-sc@ff655400 {
+				compatible = "amlogic, isp-sc";
+				reg = <0x0 0xff655400 0x0 0x00001000>;
+				reg-names = "isp_sc";
+				interrupts = <0 17 4>;
+				interrupt-names = "isp_sc";
+				status = "okay";
+			};
+
 			adapter: isp-adapter@ff650000 {
 				compatible = "amlogic, isp-adapter";
 				reg = <0x0 0xff650000 0x0 0x00006000>;
 				reg-names = "adapter";
-				interrupts = <0 179 0>;
+				interrupts = <0 179 4>;
 				interrupt-names = "adapter-irq";
 				mem_alloc = <48>;
 				status = "okay";
@@ -114,12 +140,12 @@
 				      <0x0 0xff654400 0x0 0x00000100>;
 				reg-names = "csi2_phy0", "csi2_phy1", "aphy_reg",
 					    "csi0_host", "csi1_host";
-				interrupts = <0 41 0>,
-					     <0 42 0>,
-					     <0 72 0>,
-					     <0 74 0>,
-					     <0 87 0>,
-					     <0 88 0>;
+				interrupts = <0 41 4>,
+					     <0 42 4>,
+					     <0 72 4>,
+					     <0 74 4>,
+					     <0 87 4>,
+					     <0 88 4>;
 				interrupt-names = "phy0-irq",
 						  "phy1-irq",
 						  "csi-host0-intr2",
@@ -148,30 +174,82 @@
 				compatible = "sony,imx415";
 				reg = <0x1a>;
 
-				clocks = <&isp_clkc 6>;
-				clock-names = "inck";
-				/* gen_clk defaults to xtal/1 = 24MHz, one of
-				 * imx415.c's two supported INCK rates - see
-				 * camera-overlay build notes. No
-				 * assigned-clock-rates needed: xtal is fixed
-				 * and gen_clk's divider default (0) already
-				 * yields parent-rate/1.
+				/*
+				 * The sensor's actual INCK is the SoC's
+				 * CLK12_24 output on GPIOAO_10, which Linux
+				 * does not model as a clock at all (mainline
+				 * has neither the clock nor the pinctrl
+				 * function) - it is switched on by the
+				 * ao_mclk module, not by the clk framework.
+				 * imx415.c only ever calls clk_get_rate() on
+				 * this, so a fixed-clock stating the true
+				 * 24 MHz is both sufficient and honest.
+				 *
+				 * NOTE: this was previously <&isp_clkc 6>
+				 * (gen_clk). That was wrong: gen_clk comes out
+				 * on GPIOAO_11, which the schematic shows
+				 * going to the *panel* connector, not the
+				 * camera - so it could never have clocked the
+				 * sensor no matter what it was set to.
 				 */
+				clocks = <&imx415_inck>;
+				clock-names = "inck";
 
 				dvdd-supply = <&imx415_dvdd>;
 				ovdd-supply = <&imx415_ovdd>;
 				avdd-supply = <&imx415_avdd>;
 
-				/* No reset-gpios: devm_gpiod_get_optional()
-				 * in imx415.c, safe to omit - see header
-				 * comment on why the real GPIO ball isn't
-				 * known yet. */
+				/*
+				 * CM_RST_L = GPIOA_11 (ball G22), from
+				 * schematic page 6; GPIOA_11 is pin/line 60 of
+				 * the periphs bank (&gpio). Active low, as the
+				 * _L suffix implies. Letting imx415.c own this
+				 * means the sensor gets a proper reset pulse
+				 * at power-on instead of relying on whatever
+				 * state the pin powered up in.
+				 * 1 == GPIO_ACTIVE_LOW (avoids needing the
+				 * dt-bindings header at overlay build time).
+				 */
+				reset-gpios = <&gpio 60 1>;
 
 				port {
 					imx415_ep: endpoint {
 						remote-endpoint = <&isp_ep>;
-						data-lanes = <1 2 3 4>;
-						link-frequencies = /bits/ 64 <600000000>;
+						/*
+						 * 2 lanes @ 720 MHz link freq
+						 * (= 1440 Mbps/lane).
+						 *
+						 * imx415.c only accepts an
+						 * (inck, lane_rate, lanes)
+						 * triple that exists in BOTH
+						 * imx415_clk_params[] and
+						 * supported_modes[]:
+						 *
+						 *   lane_rate  inck   lanes
+						 *    720 MHz   24MHz    2
+						 *   1440 MHz   24MHz    2
+						 *    891 MHz   27MHz    4
+						 *
+						 * gen_clk gives a 24 MHz INCK
+						 * (xtal, divider 1), so the
+						 * only 4-lane mode is out of
+						 * reach without reparenting
+						 * gen_clk to an MPLL and
+						 * setting it to 27 MHz. The
+						 * connector does wire all four
+						 * lanes (D0..D3), so 4-lane is
+						 * a real future improvement -
+						 * it's also the higher total
+						 * bandwidth (3564 vs 2880
+						 * Mbps). Driving only D0/D1 is
+						 * electrically fine meanwhile.
+						 *
+						 * link-frequencies is the DDR
+						 * *clock*, i.e. half the lane
+						 * rate: 1440/2 = 720 MHz.
+						 */
+						data-lanes = <1 2>;
+						link-frequencies = /bits/ 64 <720000000>;
 					};
 				};
 			};
@@ -194,6 +272,16 @@
 			 * falling back - these exist to satisfy that, not to
 			 * model real board power sequencing.
 			 */
+			/* Stands in for the SoC's CLK12_24 output, which
+			 * ao_mclk routes to GPIOAO_10. See the sensor node's
+			 * clocks property for why this is a fixed-clock. */
+			imx415_inck: clock-imx415-inck {
+				compatible = "fixed-clock";
+				#clock-cells = <0>;
+				clock-frequency = <24000000>;
+				clock-output-names = "imx415_inck";
+			};
+
 			imx415_dvdd: regulator-imx415-dvdd {
 				compatible = "regulator-fixed";
 				regulator-name = "imx415_dvdd";

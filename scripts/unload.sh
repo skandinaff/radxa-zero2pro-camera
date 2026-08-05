@@ -9,7 +9,7 @@ set -e
 
 [ "$(id -u)" -eq 0 ] || { echo "error: must run as root" >&2; exit 1; }
 
-for m in imx415 iv009_isp dtbo_loader isp_clkc; do
+for m in imx415 iv009_isp ao_mclk dtbo_loader isp_clkc; do
 	if lsmod | grep -q "^$m "; then
 		printf 'rmmod %s\n' "$m"
 		rmmod "$m" || printf '  WARNING: rmmod %s failed\n' "$m"
@@ -17,4 +17,4 @@ for m in imx415 iv009_isp dtbo_loader isp_clkc; do
 done
 
 printf '\nRemaining camera modules (should be empty):\n'
-lsmod | grep -E '^(imx415|iv009_isp|dtbo_loader|isp_clkc) ' || printf '  none\n'
+lsmod | grep -E "^(imx415|iv009_isp|ao_mclk|dtbo_loader|isp_clkc) " || printf '  none\n'

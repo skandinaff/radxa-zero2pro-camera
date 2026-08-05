@@ -591,17 +591,50 @@ static int32_t isp_platform_probe( struct platform_device *pdev )
         return rc;
     }
 
-    // Initialize irq
-    isp_res = platform_get_resource_byname( pdev,
-        IORESOURCE_IRQ, "ISP" );
-
-    if ( isp_res ) {
-        LOG( LOG_ERR, "Juno isp irq = %d, flags = 0x%x !\n", (int)isp_res->start, (int)isp_res->flags );
-        system_interrupts_set_irq( isp_res->start, isp_res->flags );
-    } else {
-        LOG( LOG_ERR, "Error, no isp_irq found from DT\n" );
-        return -1;
+    {
+        /* Diagnostic: dump what the platform core actually handed us.
+         * Kept because "no irq found" on a DT node that visibly *has*
+         * interrupts is otherwise very hard to tell apart from a
+         * resource-population problem. */
+        int ri;
+        LOG( LOG_ERR, "pdev %s has %u resources\n",
+             dev_name(&pdev->dev), pdev->num_resources );
+        for ( ri = 0; ri < pdev->num_resources; ri++ ) {
+            struct resource *r = &pdev->resource[ri];
+            LOG( LOG_ERR, "  res[%d] type=%s start=0x%llx end=0x%llx name=%s\n",
+                 ri,
+                 resource_type(r) == IORESOURCE_MEM ? "MEM" :
+                 resource_type(r) == IORESOURCE_IRQ ? "IRQ" : "?",
+                 (unsigned long long)r->start,
+                 (unsigned long long)r->end,
+                 r->name ? r->name : "(null)" );
+        }
     }
+
+    /* Initialize irq.
+     *
+     * Was platform_get_resource_byname(IORESOURCE_IRQ, "ISP"), which only
+     * works if the platform core pre-populated an IRQ resource *and* copied
+     * the interrupt-names string into resource->name. platform_get_irq_byname()
+     * is the modern equivalent: it resolves the name against the DT node
+     * directly via of_irq_get_byname(), so it works regardless of how the
+     * device was instantiated (notably for overlay-created devices), and it
+     * returns a proper -EPROBE_DEFER if the irqchip isn't up yet instead of
+     * silently looking like "no such interrupt".
+     *
+     * The flags argument is discarded by system_interrupts_set_irq() anyway
+     * (it hardcodes IRQF_SHARED), so nothing is lost by not having a struct
+     * resource here.
+     */
+    rc = platform_get_irq_byname( pdev, "ISP" );
+    if ( rc >= 0 ) {
+        LOG( LOG_ERR, "Juno isp irq = %d !\n", rc );
+        system_interrupts_set_irq( rc, IRQF_SHARED );
+    } else {
+        LOG( LOG_ERR, "Error, no isp_irq found from DT (%d)\n", rc );
+        return rc;
+    }
+    rc = 0;
 
     isp_res = platform_get_resource( pdev,
         IORESOURCE_MEM, 0 );

@@ -2,7 +2,7 @@
 # Read-only inspection of what actually came up. Run after scripts/load.sh.
 
 printf '=== loaded modules ===\n'
-lsmod | grep -E '^(imx415|iv009_isp|dtbo_loader|isp_clkc) ' || printf '  none\n'
+lsmod | grep -E '^(imx415|iv009_isp|ao_mclk|dtbo_loader|isp_clkc) ' || printf '  none\n'
 
 printf '\n=== isp_clkc clocks ===\n'
 if [ -r /sys/kernel/debug/clk/clk_summary ]; then

@@ -39,6 +39,21 @@ if [ "$STAGE" = clk ]; then
 	exit 0
 fi
 
+# iv009_isp and imx415 link against V4L2 helpers that nothing on a stock
+# board has pulled in yet: the only in-tree V4L2 user here is meson-vdec (the
+# hardware video decoder), which is m2m and needs neither the async-subdev
+# notifier nor vmalloc vb2 buffers. Without these, insmod fails with
+# "Unknown symbol in module" (v4l2_async_nf_*, vb2_vmalloc_memops).
+printf '=== modprobe v4l2 dependencies ===\n'
+for m in v4l2-async v4l2-fwnode videobuf2-vmalloc; do
+	modprobe "$m" && printf '  %s\n' "$m"
+done
+
+# Route CLK12_24 to GPIOAO_10 so the sensor actually gets its MCLK. Must come
+# before imx415: with no clock the IMX415 does not respond on i2c at all.
+printf '=== insmod ao_mclk (camera MCLK pinmux) ===\n'
+insmod "$ROOT/ao-mclk/ao_mclk.ko"
+
 printf '=== insmod iv009_isp ===\n'
 insmod "$ROOT/isp-module/iv009_isp.ko"
 

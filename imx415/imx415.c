@@ -978,8 +978,16 @@ static int imx415_power_on(struct imx415 *sensor)
 	 * Data sheet states that 20 us are required before communication start,
 	 * but this doesn't work in all cases. Use 100 us to be on the safe
 	 * side.
+	 *
+	 * radxa-zero2pro-camera: 100 us is far too short for the Radxa Camera
+	 * 4K on this board -- measured from userspace, the module does not
+	 * appear on i2c until ~10 ms after XCLR release. 50 ms is used here.
+	 * NOTE: this alone does NOT make probe succeed; see README "Where it
+	 * stands". The XCLR low-pulse width turned out not to matter.
+	 * This is the only change to an otherwise verbatim copy of mainline
+	 * v6.3's imx415.c.
 	 */
-	usleep_range(100, 200);
+	msleep(50);
 
 	return 0;
 

@@ -13,7 +13,7 @@ if [ ! -d "$KDIR" ]; then
 	exit 1
 fi
 
-for d in dtbo-loader isp-clkc imx415 isp-module; do
+for d in dtbo-loader isp-clkc ao-mclk imx415 isp-module; do
 	printf '=== %s ===\n' "$d"
 	make -C "$ROOT/$d" KDIR="$KDIR"
 done
