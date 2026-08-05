@@ -1,0 +1,222 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Radxa Zero 2 Pro (Amlogic A311D) + Radxa 4K Camera (IMX415) overlay.
+ *
+ * Ties together, in one compile+apply unit (avoids needing cross-overlay
+ * __symbols__/__fixups__ ordering):
+ *   fragment@0: isp_clkc  - the auxiliary clock provider (isp_clkc.ko)
+ *               registering the 7 ISP/CSI/gen_clk clocks this kernel's
+ *               built-in amlogic,g12b-clkc driver doesn't have. See
+ *               isp_clkc.c / PORT_NOTES.md in build-clk/.
+ *   fragment@1: isp@ff140000 / isp-adapter@ff650000 / phy-csi@ff650000 -
+ *               the vendor ISP/CSI2-PHY hardware nodes (iv009_isp.ko),
+ *               register layout from mesong12b.dtsi (khadas-vims-4.9.y),
+ *               clocks repointed at &isp_clkc instead of the vendor's
+ *               &clkc (which doesn't have them on this kernel).
+ *   fragment@2: the imx415 i2c child node under i2c3 (already enabled and
+ *               live as /dev/i2c-3 on this board - confirmed via the
+ *               official schematic, see below).
+ *   fragment@3: three always-on regulator-fixed stand-ins for imx415's
+ *               dvdd/ovdd/avdd supplies.
+ *
+ * Hardware facts below are from Radxa's official
+ * radxa_zero_2_pro_v1.2_schematic.pdf (pages 9 "CPU I/O" and 13
+ * "Panel/CAM/40PIN"), not guessed:
+ *   - CSI connector (J5002, 31-pin 0.3mm FPC) MIPI_CSI_D0..D3 + CLKA data/
+ *     clock lanes wire straight to the A311D's own CSI PHY pins - these
+ *     are silicon-fixed, nothing to configure in DT beyond the phy-csi
+ *     node itself (already vendor-defined, unchanged).
+ *   - CM_MCLK (the connector's sensor clock pin) is wired to ball BF16 =
+ *     GPIOAO_10, whose CLK12_24 alt-function is exactly the SoC's
+ *     "gen_clk" output - matches the vendor kvim3_linux.dts sensor node's
+ *     own `clocks = <&clkc CLKID_GEN_CLK>`. No pinmux overlay needed for
+ *     this pin: gen_clk's alt-function routing through GPIOAO_10 is
+ *     controlled by the clock's own hardware path, not a separate
+ *     pinctrl group (same as how the vendor dts wires it - the sensor
+ *     node there only has `pinctrl-0 = <&gen_clk_ee_ao>` for a *different*
+ *     board/pin combination; this board's schematic shows CM_MCLK fixed
+ *     to GPIOAO_10 with no alternate routing option, so nothing to select).
+ *   - CM_I2C_SCL/CM_I2C_SDA (connector pins 24/25) are the *same net* as
+ *     the 40-pin header's "I2C7_SDA/SCL" pins (3/5) - confirmed by
+ *     decompiling /boot/dtbo/meson-g12-i2c-ee-m3-a.dtbo on the live board:
+ *     it targets i2c3 (alias -> /soc/bus@ffd00000/i2c@1c000) on
+ *     GPIOA_14/15, and is already status=okay by default (ships enabled,
+ *     confirmed live as /dev/i2c-3). No i2c-enable overlay needed.
+ *
+ * NOT verified from the schematic (flagged, not guessed): CM_PWRDN_1 /
+ * CM_RST_L / CM_FS's exact GPIO ball numbers. imx415.c's reset-gpios is
+ * `devm_gpiod_get_optional()` (see imx415.c ~line 1074), so omitting
+ * `reset-gpios` here is safe - the driver just skips the reset toggle
+ * rather than failing to probe. Whether the sensor needs that toggle to
+ * come out of hardware reset on power-up is unverified; if the sensor
+ * doesn't respond on i2c-3 (`i2cdetect -y 3` shows no device at 0x1a),
+ * this is the first thing to chase down (multimeter continuity from J5002
+ * pin 23/26/27 back to a specific GPIOx ball, or physical trial-and-error
+ * with gpioset while watching for a response).
+ */
+
+/ {
+	fragment@0 {
+		target-path = "/soc/bus@ff600000/bus@3c000/system-controller@0";
+
+		__overlay__ {
+			isp_clkc: isp-clkc {
+				compatible = "radxa,zero2pro-isp-clkc";
+				#clock-cells = <1>;
+				status = "okay";
+			};
+		};
+	};
+
+	fragment@1 {
+		target-path = "/";
+
+		__overlay__ {
+			isp: isp@ff140000 {
+				compatible = "arm, isp";
+				reg = <0x0 0xff140000 0x0 0x00040000>;
+				reg-names = "ISP";
+				isp-efuse = <0xff630038 0x4000>;
+				interrupts = <0 142 4>;
+				interrupt-names = "ISP";
+				temper-buf-size = <24>;
+				clocks = <&isp_clkc 0>, <&isp_clkc 1>;
+				clock-names = "cts_mipi_isp_clk_composite",
+					      "cts_mipi_csi_phy_clk0_composite";
+				link-device = <&adapter>;
+				status = "okay";
+
+				port {
+					isp_ep: endpoint {
+						remote-endpoint = <&imx415_ep>;
+					};
+				};
+			};
+
+			adapter: isp-adapter@ff650000 {
+				compatible = "amlogic, isp-adapter";
+				reg = <0x0 0xff650000 0x0 0x00006000>;
+				reg-names = "adapter";
+				interrupts = <0 179 0>;
+				interrupt-names = "adapter-irq";
+				mem_alloc = <48>;
+				status = "okay";
+			};
+
+			phycsi: phy-csi@ff650000 {
+				compatible = "amlogic, phy-csi";
+				reg = <0x0 0xff650000 0x0 0x00002000>,
+				      <0x0 0xff652000 0x0 0x00002000>,
+				      <0x0 0xff63c300 0x0 0x00000100>,
+				      <0x0 0xff654000 0x0 0x00000100>,
+				      <0x0 0xff654400 0x0 0x00000100>;
+				reg-names = "csi2_phy0", "csi2_phy1", "aphy_reg",
+					    "csi0_host", "csi1_host";
+				interrupts = <0 41 0>,
+					     <0 42 0>,
+					     <0 72 0>,
+					     <0 74 0>,
+					     <0 87 0>,
+					     <0 88 0>;
+				interrupt-names = "phy0-irq",
+						  "phy1-irq",
+						  "csi-host0-intr2",
+						  "csi-host0-intr1",
+						  "csi-host1-intr2",
+						  "csi-host1-intr1";
+				link-device = <&adapter>;
+				status = "okay";
+			};
+		};
+	};
+
+	fragment@2 {
+		/* i2c3 = /soc/bus@ffd00000/i2c@1c000, already enabled by
+		 * default on this board (meson-g12-i2c-ee-m3-a.dtbo ships
+		 * without .disabled) and confirmed the same physical bus as
+		 * the CSI connector's CM_I2C_SCL/SDA net - see header comment.
+		 */
+		target-path = "/soc/bus@ffd00000/i2c@1c000";
+
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			imx415: camera-sensor@1a {
+				compatible = "sony,imx415";
+				reg = <0x1a>;
+
+				clocks = <&isp_clkc 6>;
+				clock-names = "inck";
+				/* gen_clk defaults to xtal/1 = 24MHz, one of
+				 * imx415.c's two supported INCK rates - see
+				 * camera-overlay build notes. No
+				 * assigned-clock-rates needed: xtal is fixed
+				 * and gen_clk's divider default (0) already
+				 * yields parent-rate/1.
+				 */
+
+				dvdd-supply = <&imx415_dvdd>;
+				ovdd-supply = <&imx415_ovdd>;
+				avdd-supply = <&imx415_avdd>;
+
+				/* No reset-gpios: devm_gpiod_get_optional()
+				 * in imx415.c, safe to omit - see header
+				 * comment on why the real GPIO ball isn't
+				 * known yet. */
+
+				port {
+					imx415_ep: endpoint {
+						remote-endpoint = <&isp_ep>;
+						data-lanes = <1 2 3 4>;
+						link-frequencies = /bits/ 64 <600000000>;
+					};
+				};
+			};
+		};
+	};
+
+	fragment@3 {
+		target-path = "/";
+
+		__overlay__ {
+			/* Always-on stand-ins, not real switched rails: the
+			 * schematic shows the CSI connector getting fixed
+			 * VCC3.3V/VCC5V directly (no software power-gating
+			 * GPIO on this connector) - the camera module
+			 * presumably regulates its own dvdd/ovdd/avdd
+			 * on-module from that. CONFIG_REGULATOR_DUMMY is not
+			 * enabled on this kernel (checked
+			 * /proc/config.gz), so devm_regulator_bulk_get()
+			 * needs *something* to resolve rather than silently
+			 * falling back - these exist to satisfy that, not to
+			 * model real board power sequencing.
+			 */
+			imx415_dvdd: regulator-imx415-dvdd {
+				compatible = "regulator-fixed";
+				regulator-name = "imx415_dvdd";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-always-on;
+			};
+
+			imx415_ovdd: regulator-imx415-ovdd {
+				compatible = "regulator-fixed";
+				regulator-name = "imx415_ovdd";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+			};
+
+			imx415_avdd: regulator-imx415-avdd {
+				compatible = "regulator-fixed";
+				regulator-name = "imx415_avdd";
+				regulator-min-microvolt = <2900000>;
+				regulator-max-microvolt = <2900000>;
+				regulator-always-on;
+			};
+		};
+	};
+};

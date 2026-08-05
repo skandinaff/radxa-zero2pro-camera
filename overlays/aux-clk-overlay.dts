@@ -1,0 +1,59 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Adds the isp_clkc clock-provider node as a child of the live HHI
+ * syscon node, sibling to the existing "clock-controller" (the built-in
+ * amlogic,g12b-clkc, compatible = "amlogic,g12b-clkc") and
+ * "power-controller" nodes.
+ *
+ * target-path verified directly against the live board:
+ *   $ sudo find /sys/firmware/devicetree/base -iname '*system-controller*'
+ *   /sys/firmware/devicetree/base/soc/bus@ff600000/bus@3c000/system-controller@0
+ * (compatible = "amlogic,meson-gx-hhi-sysctrl", "simple-mfd", "syscon";
+ * reg = <0x0 0x0 0x0 0x400>; phandle 0xed in the decompiled
+ * reference/zero2pro.dts, which matches this exact live node).
+ *
+ * NOT the AO-domain "bus@ff800000/sys-ctrl@0/clock-controller" - that's
+ * a different, unrelated clock controller (always-on domain).
+ *
+ * isp_clkc's own compiled driver (isp_clkc.c in this directory) matches
+ * on compatible = "radxa,zero2pro-isp-clkc" and looks up the shared HHI
+ * regmap via device_node_to_regmap() on its *parent* device node, i.e.
+ * it depends on being a direct child of the syscon node exactly as
+ * placed here (same pattern the live "clock-controller" sibling uses).
+ *
+ * Output index mapping via #clock-cells = <1> (see isp_clkc.c for full
+ * detail):
+ *   0 = cts_mipi_isp_clk_composite
+ *   1 = cts_mipi_csi_phy_clk0_composite
+ *   2 = csi_dig gate
+ *   3 = mipi_isp gate
+ *   4 = csi2_phy0 gate
+ *   5 = csi2_phy1 gate
+ *
+ * A consumer node (e.g. isp@ff140000 in the separately-assembled camera
+ * overlay) references these as <&isp_clkc 0>, <&isp_clkc 1>, etc.
+ *
+ * IMPORTANT for whoever assembles/loads the camera overlay: this overlay
+ * must be applied (via dtbo_loader or equivalent) BEFORE any overlay
+ * that references "&isp_clkc" by label, and both .dts files must be
+ * compiled with `dtc -@ ...` (symbols enabled) for the cross-overlay
+ * phandle fixup to resolve at apply time - a label defined in one
+ * independently-compiled/applied overlay is only resolvable from another
+ * overlay if both carry __symbols__/__fixups__ data. See PORT_NOTES.md.
+ */
+
+/ {
+	fragment@0 {
+		target-path = "/soc/bus@ff600000/bus@3c000/system-controller@0";
+
+		__overlay__ {
+			isp_clkc: isp-clkc {
+				compatible = "radxa,zero2pro-isp-clkc";
+				#clock-cells = <1>;
+				status = "okay";
+			};
+		};
+	};
+};

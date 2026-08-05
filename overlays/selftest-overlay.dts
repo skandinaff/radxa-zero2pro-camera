@@ -1,0 +1,14 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			dtbo-loader-selftest {
+				compatible = "dtbo-loader,selftest";
+				status = "okay";
+			};
+		};
+	};
+};
