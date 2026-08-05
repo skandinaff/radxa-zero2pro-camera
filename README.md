@@ -99,16 +99,20 @@ not survive a reboot, by design.
 
 ## Current status
 
-**Proven:**
+**Proven on hardware:**
 - All four modules compile clean against the board's real 6.1.68 headers.
 - All overlays compile clean with `dtc -@`, with phandles/fixups resolving.
-- `dtbo_loader` works: a test overlay was applied to the live kernel, verified
-  in `/proc/device-tree`, then cleanly removed. This is the rollback mechanism,
-  and it is the one runtime thing that has been end-to-end validated.
+- `dtbo_loader` works: overlays apply to the live kernel and are cleanly
+  removed on `rmmod`. This is the rollback mechanism, and it is validated
+  end-to-end.
+- **Stage 1 (`load.sh clk`) works.** `isp_clkc` binds to the HHI syscon and
+  registers all 7 clocks; they appear in `clk_summary` with `gen_clk` at the
+  24 MHz the IMX415 expects for INCK.
 - `/boot` verified byte-identical (SHA-256, 70 files) after all work.
+- Plenty of headroom for the ISP's DMA buffers: 896 MB CMA pool, ~880 MB free.
 
 **Not yet proven:**
-- The ISP/clock/sensor modules have **not been loaded onto a live kernel yet**.
+- The ISP and sensor modules have not been loaded onto a live kernel yet.
 - No image has been captured.
 
 ### Known open issues

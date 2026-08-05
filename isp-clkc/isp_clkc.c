@@ -233,9 +233,33 @@ static int isp_clkc_mux_set_parent(struct clk_hw *hw, u8 index)
 				   field << mux->shift);
 }
 
+/*
+ * .determine_rate is required, not optional, because we register each
+ * vendor "composite" as three separate clks (mux -> div -> gate) rather
+ * than one clk_register_composite(). In the vendor's single-clk form,
+ * clk_composite_determine_rate() walks the mux's parents internally to
+ * find one that can supply the requested rate. Splitting the stages
+ * loses that for free, so it has to be rebuilt explicitly: the divider
+ * (which carries CLK_SET_RATE_PARENT) asks its parent - this mux - to
+ * round, and without a .determine_rate here clk_core_can_round() fails
+ * on the mux and the whole set_rate silently leaves the rate alone.
+ *
+ * __clk_mux_determine_rate is the generic core helper (the same one
+ * in-tree clk_mux_ops installs); it works against any clk_hw - it only
+ * uses clk_hw_get_parent_by_index() - so it does not care that our mux
+ * is regmap-backed rather than a struct clk_mux. It picks the parent
+ * giving the highest rate <= the request, which is what we want: a
+ * camera pipeline should never be clocked faster than asked for.
+ *
+ * This matters concretely: iv009_isp asks for 666666667 Hz, which is
+ * only reachable by reparenting to fclk_div3 (2000/3 MHz, divider 1).
+ * The MIPI clock asks for 200000000 Hz -> fclk_div5 (400 MHz) / 2.
+ * Both are impossible from the xtal (24 MHz) the mux powers up on.
+ */
 static const struct clk_ops isp_clkc_mux_ops = {
 	.get_parent = isp_clkc_mux_get_parent,
 	.set_parent = isp_clkc_mux_set_parent,
+	.determine_rate = __clk_mux_determine_rate,
 };
 
 /*
@@ -495,22 +519,34 @@ static int isp_clkc_probe(struct platform_device *pdev)
 	ret = isp_clkc_register_div(dev, map, &priv->isp_div,
 				     "cts_mipi_isp_clk_div",
 				     "cts_mipi_isp_clk_mux",
-				     HHI_MIPI_ISP_CLK_CNTL, 0, 7, 0);
+				     HHI_MIPI_ISP_CLK_CNTL, 0, 7,
+				     CLK_SET_RATE_PARENT);
 	if (ret)
 		return dev_err_probe(dev, ret, "isp div register failed\n");
 
-	/* Matches vendor cts_mipi_isp_clk_gate's flags exactly
-	 * (CLK_GET_RATE_NOCACHE only - no CLK_IGNORE_UNUSED, no
-	 * CLK_SET_RATE_PARENT). CLK_GET_RATE_NOCACHE itself is a no-op here
-	 * since isp_clkc_div_recalc_rate() always does a live regmap_read
-	 * anyway, never caches - kept for fidelity with the vendor source,
-	 * not because it changes behavior in this regmap-backed port.
+	/*
+	 * CLK_SET_RATE_PARENT on both the gate and the divider above is
+	 * NOT what the vendor sets on its cts_mipi_isp_clk_gate, and that
+	 * difference is deliberate. The vendor builds one clk via
+	 * clk_register_composite(), where set_rate lands on the divider
+	 * stage directly; its flags describe a clk that already contains
+	 * the divider. Here the gate is its own clk with no .set_rate and
+	 * no .determine_rate, so without CLK_SET_RATE_PARENT the core's
+	 * clk_core_can_round() gives up at the gate and clk_set_rate()
+	 * returns 0 having changed nothing - the ISP would silently run at
+	 * the 24 MHz xtal default instead of 666 MHz. Copying the vendor
+	 * flag verbatim into a split topology was a bug; these two flags
+	 * reconstruct the linkage clk_register_composite() gave implicitly.
+	 *
+	 * CLK_GET_RATE_NOCACHE is dropped as it was always a no-op here:
+	 * isp_clkc_div_recalc_rate() does a live regmap_read every time and
+	 * never caches.
 	 */
 	ret = isp_clkc_register_gate(dev, map, &priv->isp_gate,
 				      "cts_mipi_isp_clk_composite",
 				      "cts_mipi_isp_clk_div",
 				      HHI_MIPI_ISP_CLK_CNTL, 8,
-				      CLK_GET_RATE_NOCACHE);
+				      CLK_SET_RATE_PARENT);
 	if (ret)
 		return dev_err_probe(dev, ret, "isp gate register failed\n");
 
@@ -525,10 +561,14 @@ static int isp_clkc_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "csi_phy0 mux register failed\n");
 
+	/* CLK_SET_RATE_PARENT on div+gate for the same reason as the ISP
+	 * composite above - see that comment. Target here is 200 MHz.
+	 */
 	ret = isp_clkc_register_div(dev, map, &priv->csi_phy0_div,
 				     "cts_mipi_csi_phy_clk0_div",
 				     "cts_mipi_csi_phy_clk0_mux",
-				     HHI_MIPI_CSI_PHY_CLK_CNTL, 0, 7, 0);
+				     HHI_MIPI_CSI_PHY_CLK_CNTL, 0, 7,
+				     CLK_SET_RATE_PARENT);
 	if (ret)
 		return dev_err_probe(dev, ret, "csi_phy0 div register failed\n");
 
@@ -536,7 +576,7 @@ static int isp_clkc_probe(struct platform_device *pdev)
 				      "cts_mipi_csi_phy_clk0_composite",
 				      "cts_mipi_csi_phy_clk0_div",
 				      HHI_MIPI_CSI_PHY_CLK_CNTL, 8,
-				      CLK_GET_RATE_NOCACHE);
+				      CLK_SET_RATE_PARENT);
 	if (ret)
 		return dev_err_probe(dev, ret, "csi_phy0 gate register failed\n");
 
