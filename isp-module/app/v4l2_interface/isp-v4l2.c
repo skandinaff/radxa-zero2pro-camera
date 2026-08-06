@@ -403,6 +403,30 @@ static int isp_v4l2_streamon( struct file *file, void *priv, enum v4l2_buf_type 
     if ( isp_v4l2_is_q_busy( &sp->vb2_q, file ) )
         return -EBUSY;
 
+    /*
+     * Refuse to start a stream whose format was never negotiated.
+     *
+     * stream_type is only assigned by isp_v4l2_stream_set_format(); a stream
+     * that has never seen VIDIOC_S_FMT still carries the V4L2_STREAM_TYPE_MAX
+     * that isp_v4l2_stream_init() left there. fw_intf_stream_start() then
+     * matches none of its cases, returns immediately without ever issuing
+     * SENSOR_STREAMING, and STREAMON reports success -- so the sensor never
+     * starts, no buffer is ever filled, and userspace blocks in DQBUF forever
+     * on a pipeline it was told had started.
+     *
+     * This is easy to hit: the format lives on the stream, which is allocated
+     * per open() and reset to the default on every close(), so setting the
+     * format with a separate process (a separate v4l2-ctl invocation, say) is
+     * silently discarded. Fail loudly instead of hanging.
+     */
+    if ( pstream->stream_type >= V4L2_STREAM_TYPE_MAX ) {
+        LOG( LOG_CRIT, "[Stream#%d] STREAMON without a negotiated format "
+                       "(stream_type still %d). Call VIDIOC_S_FMT on this same "
+                       "file handle first.",
+             sp->stream_id, pstream->stream_type );
+        return -EINVAL;
+    }
+
     LOG( LOG_CRIT, "TRACE streamon: about to call vb2_streamon" );
     rc = vb2_streamon( &sp->vb2_q, i );
     LOG( LOG_CRIT, "TRACE streamon: vb2_streamon returned rc = %d", rc );

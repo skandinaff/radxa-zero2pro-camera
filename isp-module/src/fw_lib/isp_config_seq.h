@@ -836,6 +836,46 @@ static acam_reg_t fpga_linear[] = {
     { 0x0000, 0x0000, 0x0000, 0x0000 }
 };
 
+/*
+ * radxa-zero2pro-camera addition, not vendor code.
+ *
+ * The TOP-block subset of settings_context[]: the registers that decide which
+ * ISP blocks are in the datapath, and nothing else. Same addresses, values,
+ * masks and access sizes as the corresponding lines of settings_context.
+ *
+ * Why this exists: the full settings_context is what every vendor sensor driver
+ * loads, and loading it here is what finally got frames out of this ISP at a
+ * sustained 30 fps -- but it also carries ~230 registers of *tuning* captured on
+ * the vendor's own bench for their own sensor (black levels of 61440, input
+ * formatter knee points and slopes zeroed, sensor-offset-pre-shading offsets,
+ * CCM coefficients, noise profiles). Those are meaningless for an IMX415 with
+ * this board's calibration and, measured, they turn the output into something
+ * with no image structure at any stride at all. So this splits the sequence into
+ * the structural half, which is what the pipeline stall was about, and the
+ * tuning half, which belongs to calibration. Select with the isp_ctx_seq module
+ * parameter (see V4L2_drv.c) -- index 9 here, 7 for the full vendor sequence,
+ * 0 for the old linear-only behaviour.
+ *
+ * 0x18e88+0x00 (geometry) and +0x04 (rggb/cfa) are deliberately excluded: both
+ * are owned by sensor_func.c, which writes the real 3864x2192 and the real bayer
+ * order. 0x18ed8 and above (the video test generator) are excluded because the
+ * generator is bypassed and its foreground/background colours are irrelevant.
+ */
+static acam_reg_t settings_context_top[] = {
+    { 0x18eac, 0x30L, 0x3f,1 },              // bypass: gain_wdr, frame_stitch
+    { 0x18eb0, 0x2L, 0x1f,1 },               // bypass: frontend_sensor_offset; fe_sqrt in
+    { 0x18eb8, 0x0L, 0x7,1 },                // sinter/temper/ca_correction in datapath
+    { 0x18ebc, 0x0L, 0x7f,1 },               // shading/wb/iridix in datapath
+    { 0x18ec0, 0xc5L, 0x0,1 },               // bypass: mirror, demosaic_rgbir, 3d_lut, nonequ_gamma
+    { 0x18ec4, 0x0L, 0xf,1 },                // fr crop/gamma/sharpen/cs_conv in datapath
+    { 0x18ec8, 0x2L, 0x1f,1 },               // bypass: ds1_scaler
+    { 0x18ecc, 0x0L, 0x301,2 },              // raw bypass off, downscale pipe on
+    { 0x18ed0, 0x1000000L, 0x1010226,4 },    // metering enables, aexp source
+    { 0x18ed4, 0x3010200L, 0x3030303,4 },    // crossbar channel select
+    //stop sequence - address is 0x0000
+    { 0x0000, 0x0000, 0x0000, 0x0000 }
+};
+
 static const acam_reg_t *seq_table[] = {
     linear,
     settings,
@@ -846,6 +886,7 @@ static const acam_reg_t *seq_table[] = {
     fs_lin_4exp,
     settings_context,
     fpga_linear,
+    settings_context_top,
 };
 
 #define SENSOR_ISP_SEQUENCE_DEFAULT seq_table
@@ -859,5 +900,6 @@ static const acam_reg_t *seq_table[] = {
 #define SENSOR_ISP_SEQUENCE_DEFAULT_FS_LIN_4EXP    6
 #define SENSOR_ISP_SEQUENCE_DEFAULT_SETTINGS_CONTEXT    7
 #define SENSOR_ISP_SEQUENCE_DEFAULT_FPGA_LINEAR    8
+#define SENSOR_ISP_SEQUENCE_DEFAULT_SETTINGS_CONTEXT_TOP    9
 
 #endif /* __ISP_SENSOR_H__ */

@@ -58,6 +58,7 @@
 #include "isp_config_seq.h"
 
 #include <linux/delay.h>
+#include <linux/moduleparam.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-subdev.h>
 #include <media/v4l2-async.h>
@@ -71,19 +72,34 @@ extern void *acamera_camera_v4l2_get_subdev_by_prefix( const char *prefix );
 /*
  * Fixed properties of the IMX415 as this board drives it. The lane count and
  * lane rate must agree with the CSI endpoint in overlays/camera-overlay.dts:
- * data-lanes = <1 2> and link-frequencies = 720000000. That link frequency is
- * the DDR clock, so the per-lane bit rate is twice it -- 1440 Mbps -- which
- * selects mainline imx415's 2-lane/1440 mode (30.019 fps, HMAX 4510).
+ * data-lanes = <1 2 3 4> and link-frequencies = 720000000. That link frequency
+ * is the DDR clock, so the per-lane bit rate is twice it -- 1440 Mbps -- which
+ * selects imx415_mode_4_1440 (60.038 fps), the 4-lane mode this port adds.
+ *
+ * IMX415_LANES is the counterpart the overlay's endpoint comment requires:
+ * the CSI-2 receiver is NOT configured from that endpoint, it is configured
+ * from here, via am_mipi_init(). If the two disagree the PHY listens on a
+ * different number of lanes than the sensor transmits on.
+ *
+ * Why 4 lanes, for shot-vision: rolling-shutter skew is (active rows) x (line
+ * period), and the line period is the sensor's HMAX register / 72 MHz --
+ * 1066 -> 533 going from 2 lanes to 4, so 32.45 ms of skew becomes 16.23 ms.
+ * Frame rate is a separate axis, set by VMAX; see the overlay comment.
+ *
+ * IMX415_HMAX stays 4510. It is the "virtual" hmax_pix from imx415's
+ * supported_modes[] (pixels per line incl. blanking) rather than the HMAX
+ * register, and the 4-lane 1440 entry carries the same 4510 as the 2-lane
+ * one -- the doubled lane count appears as a doubled pixel_rate instead.
  */
 #define IMX415_SUBDEV_PREFIX "imx415"
-#define IMX415_LANES 2
+#define IMX415_LANES 4
 #define IMX415_LANE_RATE_MBPS 1440
 #define IMX415_WIDTH 3864
 #define IMX415_HEIGHT 2192
 #define IMX415_BITS 10
-#define IMX415_HMAX 4510 /* pixels per line incl. blanking, 2-lane 1440 mode */
+#define IMX415_HMAX 4510 /* pixels per line incl. blanking, 4-lane 1440 mode */
 #define IMX415_VMAX 2250 /* 0x08CA, as written by imx415's mode register list */
-#define IMX415_FPS_Q8 ( 30 * 256 )
+#define IMX415_FPS_Q8 ( 60 * 256 )
 
 /* imx415 emits MEDIA_BUS_FMT_SGBRG10_1X10. */
 #define IMX415_BAYER BAYER_GBRG
@@ -125,6 +141,24 @@ static sensor_context_t s_ctx[FIRMWARE_CONTEXT_NUMBER];
 static int ctx_counter = 0;
 
 static const acam_reg_t **p_isp_data = SENSOR_ISP_SEQUENCE_DEFAULT;
+
+/*
+ * Which entry of seq_table[] to load as the ISP context sequence. See the long
+ * comment at the isp_context_seq assignment in sensor_update_parameters() for
+ * what this is and why the default is what it is.
+ *
+ *   9 = settings_context_top  structural bypass bits only (default)
+ *   7 = settings_context      the full vendor sequence, tuning included
+ *   0 = linear                what this bridge did before, five registers
+ *
+ * Read once, during sensor init, so it must be set at insmod time to have any
+ * effect. It exists because these three are worth being able to A/B on the bench
+ * without a rebuild-reboot cycle, which on this board costs several minutes.
+ */
+static int isp_ctx_seq = SENSOR_ISP_SEQUENCE_DEFAULT_SETTINGS_CONTEXT_TOP;
+module_param( isp_ctx_seq, int, 0444 );
+MODULE_PARM_DESC( isp_ctx_seq,
+                  "ISP context sequence index: 9=top-only (default), 7=full vendor, 0=linear" );
 
 
 static struct v4l2_ctrl *sensor_ctrl( sensor_context_t *p_ctx, uint32_t id )
@@ -261,7 +295,54 @@ static void sensor_update_parameters( sensor_context_t *p_ctx )
     param->sensor_ctx = p_ctx;
 
     param->isp_context_seq.sequence = p_isp_data;
-    param->isp_context_seq.seq_num = SENSOR_ISP_SEQUENCE_DEFAULT_LINEAR;
+    /*
+     * SETTINGS_CONTEXT (337 registers), not LINEAR (5). This bridge used
+     * LINEAR, and that was a misreading of what isp_context_seq is for.
+     *
+     * seq_table holds two unrelated kinds of entry. linear/fs_lin_2exp/
+     * fs_lin_3exp/... are *WDR-mode overlays* -- a handful of registers each,
+     * selected by exposure count. settings/settings_context are *full ISP
+     * context configurations*. isp_context_seq is the second kind: acamera_fw.c
+     * acamera_init_context_seq() feeds it to acamera_load_sw_sequence(), which
+     * writes the software config page that is then DMA'd into ping and pong.
+     *
+     * Every vendor sensor driver in the tree this was ported from
+     * (subdev/sensor/src/driver/sensor/{IMX227,IMX290,IMX307,IMX481,OV08a10}_drv.c)
+     * points isp_context_seq at its own <SENSOR>_CONTEXT_SEQ, and each of those
+     * is a ~337-register block. OV08a10's settings_context_os08a10[] -- the 4K
+     * sensor, the closest analogue to the IMX415 here -- is byte-for-byte
+     * identical to the generic settings_context[] in isp_config_seq.h, verified
+     * entry by entry. So loading index 7 is exactly what the vendor does for a
+     * 4K sensor, not an approximation of it.
+     *
+     * settings_context is a strict superset of linear: all five of linear's
+     * addresses (0x18e8c, 0x18eac, 0x18f98, 0x1937c, 0x1aa3c) appear in it with
+     * the same or wider masks and the same values, so nothing is lost.
+     *
+     * What was being lost: 239 register fields sat at hardware reset defaults
+     * that no FSM ever writes. Structurally the important ones are the pipeline
+     * bypass bits at TOP offsets 0x28-0x40 -- grep the tree for
+     * bypass_3d_lut/bypass_nonequ_gamma/bypass_demosaic_rgbir/
+     * bypass_frontend_sensor_offset/bypass_fe_sqrt and nothing writes any of
+     * them. All default to "in the datapath", so the ISP was running a Bayer
+     * stream through an RGB-IR demosaic, an unloaded 3D LUT and a non-equidistant
+     * gamma block, none of which had ever been configured. That is a much better
+     * fit for "ISP consumes one frame start and never completes the frame" than
+     * anything on the receive side, which measures healthy.
+     *
+     * Measured, in that order:
+     *   index 0 (linear)           ISP takes one frame start, fr_pipeline_busy
+     *                              latches at 1 forever, FRAME_COLLISION every
+     *                              33.3 ms. No capture.
+     *   index 7 (settings_context) 90 frames at a sustained 30.02 fps, but the
+     *                              buffers hold no image -- autocorrelation
+     *                              finds no stride above 0.53, against 0.986 at
+     *                              stride 3968 for a known-good capture. The
+     *                              tuning half of the sequence is the vendor's
+     *                              bench calibration for their sensor.
+     *   index 9 (..._TOP)          the structural half only; the default here.
+     */
+    param->isp_context_seq.seq_num = isp_ctx_seq;
     /* ARRAY_SIZE, not the vendor's array_size(): the kernel defines
      * array_size(a, b) as an overflow-checked multiply. */
     param->isp_context_seq.seq_table_max = ARRAY_SIZE( seq_table );

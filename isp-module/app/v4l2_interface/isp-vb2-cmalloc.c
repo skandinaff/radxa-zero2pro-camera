@@ -113,6 +113,7 @@ static void *vb2_cmalloc_alloc(struct vb2_buffer *vb, struct device *dev,
 	buf->handler.refcount = &buf->refcount;
 	buf->handler.put = vb2_cmalloc_put;
 	buf->handler.arg = buf;
+	buf->dev = dev;
 	buf->dbuf = (void *)dev;
 
 	if (!buf->vaddr) {
@@ -239,10 +240,38 @@ static unsigned int vb2_cmalloc_num_users(void *buf_priv)
 	return refcount_read(&buf->refcount);
 }
 
+/*
+ * Added during the 6.1 port hardening pass, 2026-08-05 -- this allocator had
+ * no .cookie op, so the only way callers had to get a DMA-capable address
+ * out of a buffer was virt_to_phys(vb2_plane_vaddr(...)) (see isp-vb2.c).
+ * That is only valid if the vaddr dma_alloc_coherent() handed back sits in
+ * the kernel's linear map, which is NOT guaranteed for a device that isn't
+ * marked `dma-coherent` in its devicetree node -- and isp@ff140000 in
+ * camera-overlay.dts is not. On that path arm64 can return a non-cached
+ * remapped vaddr outside the linear map, and virt_to_phys() on it silently
+ * produces a wrong physical address rather than failing loudly. Confirmed on
+ * hardware 2026-08-05: streaming corrupted kernel memory (systemd aborted,
+ * ext4 freed-inode bitmap mismatch) within ~260ms of the very first frame,
+ * before any error-recovery code ran -- consistent with the DMA writer being
+ * armed with a garbage target address from frame 0, not a race or a size bug
+ * (both already ruled out separately).
+ *
+ * dma_alloc_coherent() already computed the one address that is guaranteed
+ * correct regardless of coherency/remapping -- buf->dma_handle -- and just
+ * never surfaced it. Wiring up .cookie is the standard vb2 mechanism for
+ * exposing exactly this (see videobuf2-dma-contig's vb2_dc_cookie() for the
+ * pattern this mirrors); isp-vb2.c now uses vb2_plane_cookie() instead of
+ * virt_to_phys().
+ */
+static void *vb2_cmalloc_cookie(struct vb2_buffer *vb, void *buf_priv)
+{
+	struct vb2_cmalloc_buf *buf = buf_priv;
+	return &buf->dma_handle;
+}
+
 static int vb2_cmalloc_mmap(void *buf_priv, struct vm_area_struct *vma)
 {
 	struct vb2_cmalloc_buf *buf = buf_priv;
-	unsigned long pfn = 0;
 	unsigned long vsize = vma->vm_end - vma->vm_start;
 	int ret = -1;
 
@@ -251,11 +280,36 @@ static int vb2_cmalloc_mmap(void *buf_priv, struct vm_area_struct *vma)
 		return -EINVAL;
 	}
 
-	pfn = virt_to_phys(buf->vaddr) >> PAGE_SHIFT;
-	ret = remap_pfn_range(vma, vma->vm_start, pfn, vsize, vma->vm_page_prot);
+	/*
+	 * dma_mmap_coherent(), not remap_pfn_range(virt_to_phys(vaddr)).
+	 *
+	 * This is the same bug that was fixed on the DMA side in isp-vb2.c, in
+	 * the other direction. buf->vaddr comes from dma_alloc_coherent(), and
+	 * for a device the kernel treats as non-coherent that vaddr is a fresh
+	 * non-cacheable mapping created by the DMA layer, not a linear-map
+	 * address. virt_to_phys() on it does not fault, it quietly returns a
+	 * number computed as if it were linear-map -- so remap_pfn_range()
+	 * mapped an unrelated run of physical pages into userspace.
+	 *
+	 * Symptom, and how this was found: capture "worked" -- 60 buffers
+	 * dequeued at a sustained 29.99 fps, no errors -- but every buffer
+	 * userspace read back was uninitialised kernel memory. `strings` on the
+	 * frames returned kernel symbol names (rtnl_link_vf_put), Mesa GLSL
+	 * builtins (floatBitsToInt), page-cache HTML and a wifi firmware version
+	 * banner. Meanwhile /dev/mem showed the FR DMA writer correctly armed and
+	 * cycling through real per-frame bank0_base addresses (0xc1000000,
+	 * 0xbfe00000, 0xc0700000) with format 13 and line offset 0xf80. The ISP
+	 * was writing the frames exactly as asked; userspace was reading a
+	 * different piece of memory entirely.
+	 *
+	 * dma_mmap_coherent() maps the pages the allocation actually owns, with
+	 * the attributes the allocation was made with, and is the only correct
+	 * way to hand a coherent allocation to userspace.
+	 */
+	ret = dma_mmap_coherent(buf->dev, vma, buf->vaddr, buf->dma_handle, vsize);
 
 	if (ret) {
-		pr_err("Remapping vmalloc memory, error: %d\n", ret);
+		pr_err("dma_mmap_coherent failed, error: %d\n", ret);
 		return ret;
 	}
 		/*
@@ -478,6 +532,7 @@ const struct vb2_mem_ops vb2_cmalloc_memops = {
 	.attach_dmabuf	= NULL,
 	.detach_dmabuf	= NULL,
 	.vaddr		= vb2_cmalloc_vaddr,
+	.cookie		= vb2_cmalloc_cookie,
 	.mmap		= vb2_cmalloc_mmap,
 	.num_users	= vb2_cmalloc_num_users,
 };

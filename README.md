@@ -6,12 +6,14 @@ under mainline-ish Linux on the **Radxa Zero 2 Pro** (Amlogic A311D, G12B).
 Everything here loads and unloads at runtime. **Nothing touches `/boot`, the
 bootloader, or the shipped devicetree.** See [Rollback](#rollback).
 
-> **Status: the ISP and clock side work on real hardware; the sensor does not
-> yet talk.** The ISP probes and runs at its intended 666 MHz, and the camera's
-> MCLK route has been found — but the IMX415 still fails register-level I²C, so
-> **there is no image capture yet.** See
-> [Where it stands](#where-it-stands-the-sensor-half-answers-on-i%C2%B2c).
-> If you are looking for a working camera today, this is not that yet.
+> **Status: it captures.** The full path — IMX415 → MIPI CSI-2 → PHY → Amlogic
+> adapter → ISP → V4L2 — delivers 3864×2192 GREY frames at a sustained
+> **60.00 fps on 4 lanes** through `/dev/video1`. See
+> [captures/4lane-60fps-2026-08-06.png](captures/4lane-60fps-2026-08-06.png)
+> and [Current status](#current-status) for what is and is not done.
+>
+> Image *tuning* is a separate matter: there is no real IQ calibration for this
+> sensor yet, so frames are correctly formed but flat and untuned.
 
 ## Why this is needed
 
@@ -126,9 +128,62 @@ not survive a reboot, by design.
 - `/boot` verified byte-identical (SHA-256, 70 files) throughout.
 - 896 MB CMA pool, ~880 MB free — no DMA-allocation concern.
 
-**Not working: there is still no image capture.** `imx415` does not probe.
+- **`imx415` probes and streams.** The MCLK question below was resolved; the
+  sensor does register-level I²C and enters its 4-lane 1440 Mbps mode.
+- **Capture works end to end.** `v4l2-ctl --stream-mmap` on the ISP node
+  delivers 120 frames at **60.00 fps**, 3864×2192 GREY, 3968-byte stride.
+  Frames are real images — the stride autocorrelation peaks exactly at 3968
+  (0.976), adjacent-row correlation is 0.977, and consecutive frames differ
+  (mean abs difference ~9.3/255), so it is live video, not one buffer repeated.
+  Note `v4l2-ctl` must be given `--set-fmt-video` in the *same* invocation:
+  this driver rejects `STREAMON` without an `S_FMT` on the same file handle.
+- **Rolling-shutter skew halved, which is why 4 lanes matters.** Skew is
+  (active rows) × (line period), *not* the frame period, and the line period is
+  the sensor's HMAX register / 72 MHz:
 
-### Where it stands: the sensor half-answers on I²C
+  | | HMAX | line period | skew over 2192 rows | fps |
+  |---|---|---|---|---|
+  | 2 lanes | 1066 | 14.806 µs | **32.45 ms** | 30.02 |
+  | 4 lanes | 533 | 7.403 µs | **16.23 ms** | 60.04 |
+
+  The measured 60.00 fps is itself the proof the line period halved, since
+  fps = 72 MHz / (VMAX × HMAX) and VMAX is unchanged at 2250.
+
+  **16.23 ms is the floor for a full-height readout on this board.** HMAX
+  cannot go below 483 (3864 px × 10 bit / 5760 Mbps = 6.708 µs of payload),
+  and the 24 MHz INCK caps the lane rate at 1440 Mbps, so the remaining 9 % is
+  not worth the loss of link margin. Going meaningfully below 16 ms requires
+  reading fewer **rows** — 2×2 binning or a vertical window — not a faster link.
+
+  HMAX sets skew; VMAX sets frame rate. `V4L2_CID_VBLANK` is writable and
+  programs VMAX at runtime, so the frame rate can be dropped back toward 30 fps
+  *without* giving back the skew improvement.
+
+**Not working / not done:**
+- **No IQ calibration.** Frames are correctly formed but untuned.
+- **The last 96 bytes of each line's stride padding are never written.** The FR
+  DMA writer emits 121 aligned 32-byte bursts per line = 3872 bytes, so columns
+  3864–3871 are zero-filled by the final burst and columns 3872–3967 keep
+  whatever was in the buffer before. Harmless — every consumer trims rows to
+  the visible 3864 — and it is *not* a kernel-memory leak, since
+  `dma_alloc_coherent()` hands back zeroed pages and only ISP writes ever land
+  there. But it does mean **"padding is all zero" is not a valid check that a
+  capture is correct**; use the stride autocorrelation instead.
+- **The ISP error routine still fires once at STREAMOFF** (`broken_frame`,
+  `fr_pipeline_busy` stuck during teardown), together with
+  `wait_event return < 0` from the stream-copy thread. Harmless to a capture
+  that has already finished; it does mean the ISP must be reloaded, and in
+  practice the board rebooted, between streaming sessions.
+- **23 buffers dropped at stream start**, then none: all three of `v4l2-ctl`'s
+  progress lines across the 120-frame run reported the same cumulative 23, so
+  it is a startup transient (the ISP settling over roughly the first 0.4 s),
+  not an inability to sustain 60 fps. Discard the opening frames.
+
+### Historical: the sensor once half-answered on I²C
+
+Kept because the measurements are still useful and the dead ends are worth not
+re-running. This was resolved — the sensor now talks — but the reasoning below
+is what narrowed it down.
 
 This is the open problem, described precisely so nobody re-runs the dead ends.
 
@@ -172,18 +227,33 @@ sensor — reading `0xff` is what a floating bus looks like.
 
 ### Other known open issues
 
-1. **DMA coherency is unverified.** The ported ISP code assumes
-   `dma_alloc_coherent()` returns a vaddr in the kernel's linear map. That held
-   on 4.9 on this SoC; it has not been re-verified for 6.1. Affects capture
-   correctness, not probe.
+1. **DMA coherency — this was real, and it bit twice.** The ported ISP code
+   assumed `dma_alloc_coherent()` returns a vaddr in the kernel's linear map, so
+   `virt_to_phys()` on it is meaningful. On 6.1 with this device that is false,
+   and `virt_to_phys()` fails silently rather than loudly. Both sides are now
+   fixed: the address handed to the ISP comes from `vb2_plane_cookie()`
+   (`isp-vb2.c`), and the userspace mapping comes from `dma_mmap_coherent()`
+   (`isp-vb2-cmalloc.c`). The second one is why capture appeared to work at
+   30 fps while every buffer userspace read back was unrelated kernel memory.
+   Worth re-checking if the DT node's coherency ever changes.
 2. **No IQ/calibration data for the IMX415.** The vendor ISP expects per-sensor
-   tuning tables. Even a successful capture would likely look bad (wrong colour,
-   exposure, black level) until calibration data exists.
-3. **Only a 2-lane mode is configured.** The connector wires all four lanes, but
-   the single 4-lane mode `imx415.c` offers needs a 27 MHz INCK, which this
-   board's MCLK path doesn't currently provide. See the endpoint comment in the
-   overlay.
-4. **`ao_mclk` pokes a pinmux register directly**, because mainline has no
+   tuning tables. Capture works; it just looks flat and untuned until real
+   calibration exists.
+3. **Four lanes are configured and working**, via `imx415_mode_4_1440[]` which
+   this port adds. The claim that 4-lane needed a 27 MHz INCK was wrong: it
+   confused two independent lookups. `imx415_check_inck()` keys on
+   (lane_rate, inck) — lane count is not part of that key — and only then is
+   `supported_modes[]` matched on (lanes, lane_rate). A 4-lane mode at an
+   already-supported lane rate therefore needs no new INCK settings, just a
+   register list. See the endpoint comment in the overlay.
+4. **Sub-16 ms skew needs fewer rows, not more bandwidth.** 2×2 binning
+   (1932×1096) would cut skew to roughly 4 ms while keeping the full field of
+   view, and would still leave ~1.7 px/mm at 10 m with a 50 mm lens — above the
+   1.45 px/mm that `shot-vision`'s detector is designed around. It needs a
+   binning register list (not in mainline `imx415.c`), matching geometry in
+   `V4L2_drv.c`, and an update to `shot-vision`'s `SENSOR_FRAME_BYTES` DMA
+   guard.
+5. **`ao_mclk` pokes a pinmux register directly**, because mainline has no
    pinctrl group for this function. It saves and restores the field, but it is a
    register poke, not a driver. The clean fix is a `clk12_24` group in
    `pinctrl-meson-g12a.c`.

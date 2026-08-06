@@ -137,8 +137,8 @@ static int isp_vb2_buf_prepare( struct vb2_buffer *vb )
 
 static int isp_vb_to_tframe(tframe_t *frame, isp_v4l2_buffer_t *buf)
 {
-    void *p_mem = NULL;
-    void *s_mem = NULL;
+    dma_addr_t *p_cookie = NULL;
+    dma_addr_t *s_cookie = NULL;
     unsigned int p_size = 0;
     unsigned int s_size = 0;
 
@@ -147,16 +147,45 @@ static int isp_vb_to_tframe(tframe_t *frame, isp_v4l2_buffer_t *buf)
         return -1;
     }
 
-    p_mem = vb2_plane_vaddr(&buf->vvb.vb2_buf, 0);
+    /* virt_to_phys(vb2_plane_vaddr(...)) used to compute these addresses.
+     * That is only valid if the buffer's vaddr sits in the kernel's linear
+     * map, which the vb2_cmalloc allocator's dma_alloc_coherent() does not
+     * guarantee for a non-`dma-coherent` device (isp@ff140000 is not marked
+     * as one) -- confirmed on hardware to corrupt memory from frame 0, see
+     * the .cookie comment in isp-vb2-cmalloc.c. vb2_plane_cookie() returns
+     * the dma_handle dma_alloc_coherent() itself produced, which is correct
+     * regardless of coherency/remapping. */
+    p_cookie = vb2_plane_cookie(&buf->vvb.vb2_buf, 0);
     p_size = PAGE_ALIGN(buf->vvb.vb2_buf.planes[0].length);
 
-    s_mem = vb2_plane_vaddr(&buf->vvb.vb2_buf, 1);
-    s_size = PAGE_ALIGN(buf->vvb.vb2_buf.planes[1].length);
-
-    frame->primary.address = virt_to_phys(p_mem);
+    if (p_cookie == NULL) {
+        LOG(LOG_ERR, "Error: vb2_plane_cookie(plane 0) returned NULL");
+        return -1;
+    }
+    frame->primary.address = *p_cookie;
     frame->primary.size = p_size;
-    frame->secondary.address = virt_to_phys(s_mem);
-    frame->secondary.size = s_size;
+
+    /* Plane 1 (UV/secondary) legitimately does not exist for single-plane
+     * formats like the GREY format this pipeline captures -- num_planes
+     * comes straight from the negotiated v4l2 format (see queue_setup()
+     * above), and vb2_plane_cookie() on a plane past that count returns
+     * NULL by design, not an error. Downstream (dma_writer.c) already
+     * gates all use of frame->secondary on the UV DMA format being enabled,
+     * so leaving the address at 0 here is inert. */
+    if (buf->vvb.vb2_buf.num_planes > 1) {
+        s_cookie = vb2_plane_cookie(&buf->vvb.vb2_buf, 1);
+        s_size = PAGE_ALIGN(buf->vvb.vb2_buf.planes[1].length);
+        if (s_cookie == NULL) {
+            LOG(LOG_ERR, "Error: vb2_plane_cookie(plane 1) returned NULL");
+            return -1;
+        }
+        frame->secondary.address = *s_cookie;
+        frame->secondary.size = s_size;
+    } else {
+        frame->secondary.address = 0;
+        frame->secondary.size = 0;
+    }
+
     frame->list = (void *)&buf->list;
 
     return 0;

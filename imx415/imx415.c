@@ -5,6 +5,45 @@
  * Copyright (C) 2023 WolfVision GmbH.
  */
 
+/*
+ * radxa-zero2pro-camera: vendored from mainline v6.3, with the deviations
+ * listed here. Every one of them is also commented at the point of change;
+ * this is the index, not the explanation.
+ *
+ *  1. imx415_power_on(): 50 ms settle after XCLR release instead of 100 us.
+ *     Pre-existing, hardware-measured.
+ *
+ *  2. NEW all-pixel 4-lane 1440 Mbps 60.038 fps mode (imx415_mode_4_1440[] +
+ *     a supported_modes[] entry). Halves the rolling-shutter skew and doubles
+ *     the frame rate versus the 2-lane 1440 mode this board runs today, with
+ *     no new INCK settings -- imx415_clk_params[] is keyed on lane RATE, not
+ *     lane count. Requires overlays/camera-overlay.dts to say
+ *     data-lanes = <1 2 3 4>.
+ *
+ *  3. V4L2_CID_VBLANK is a writable range instead of being pinned READ_ONLY
+ *     at 58, and the driver now actually programs VMAX from it. VBLANK only
+ *     makes the sensor slower; it is a debugging and long-exposure lever.
+ *
+ *  4. NEW window cropping / ROI: .set_selection, a real .get_selection, and a
+ *     set_fmt that means "centred window of this size". This is the large
+ *     skew win -- a 512-line strip reads out in 3.79 ms instead of 32.45 ms.
+ *
+ *  5. Consequences of 3 and 4: HBLANK/VBLANK/EXPOSURE ranges are re-published
+ *     when the window changes; EXPOSURE clamps to VMAX - 8 rather than VMAX
+ *     (mainline allowed SHR0 == 0, which is out of range).
+ *
+ * The motivation is a marksmanship shot trainer: frame rate, rolling-shutter
+ * skew and short exposure are what matter; image quality does not, since the
+ * consumer is a grayscale blob detector.
+ *
+ * WHAT IS UNVERIFIED. None of 2-5 has run on hardware -- there is one board
+ * and this work was done without access to it, and without the IMX415
+ * datasheet. The specific things to check first are flagged inline:
+ * the PIX_HST/PIX_HWIDTH/PIX_VST/PIX_VWIDTH register addresses (see their
+ * defines), the crop alignment granularities, and whether 58 lines of vertical
+ * blanking is still enough in cropping mode (see imx415_set_window()).
+ */
+
 #include <linux/clk.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
@@ -26,6 +65,81 @@
 #define IMX415_PIXEL_ARRAY_HEIGHT 2192
 #define IMX415_PIXEL_ARRAY_VBLANK 58
 
+/*
+ * radxa-zero2pro-camera: window-cropping limits.
+ *
+ * ============================ ALIGNMENT ==================================
+ * The IMX415 datasheet is not available to this port, so the alignment
+ * constraints below are DERIVED/CONSERVATIVE, not quoted:
+ *
+ *   - left/top MUST be even, or the Bayer phase of the first output pixel
+ *     flips and the advertised MEDIA_BUS_FMT_SGBRG10_1X10 becomes a lie.
+ *     That much is a property of any Bayer sensor and is certain.
+ *   - Sony's readout is pixel-parallel in the horizontal direction (the ADC
+ *     block converts several columns at once), which normally forces the H
+ *     start/width to a multiple of 4 or 8. 8 is used here because it is a
+ *     superset of 1/2/4/8 and costs at most 7 columns.
+ *   - 4 is used vertically for the same "superset of 1/2/4" reason.
+ *
+ * If the datasheet turns out to demand a coarser step (16 columns, say), the
+ * numbers below are the single place to change. Every geometry this port
+ * cares about survives the chosen alignment exactly: 3864 = 8*483,
+ * 2192 = 4*548, 1920 = 8*240, 1080 = 4*270, 512 = 4*128.
+ *
+ * ========================== MINIMUM WINDOW ===============================
+ * Genuinely unknown. 256x64 is a guess chosen to be far away from anything
+ * this application needs (the smallest planned ROI is 1920x512), so it
+ * should never be exercised. Do not treat it as validated.
+ */
+#define IMX415_CROP_LEFT_ALIGN	  8
+#define IMX415_CROP_WIDTH_ALIGN	  8
+#define IMX415_CROP_TOP_ALIGN	  4
+#define IMX415_CROP_HEIGHT_ALIGN  4
+#define IMX415_CROP_MIN_WIDTH	  256
+#define IMX415_CROP_MIN_HEIGHT	  64
+
+/*
+ * SHR0 holds "VMAX minus the exposure in lines". The sensor needs a few
+ * lines of margin at the end of the frame, so the exposure can never reach
+ * VMAX: exposure_max = VMAX - IMX415_SHR0_MIN. 8 is the value mainline
+ * already assumed (it computed exposure_max as height + vblank - 8) and the
+ * same number the ISP bridge uses (IMX415_INTEGRATION_MIN in V4L2_drv.c).
+ */
+#define IMX415_SHR0_MIN		  8
+#define IMX415_EXPOSURE_MIN	  4
+
+/*
+ * VMAX is written as 3 bytes (0x3024..0x3026) but the field is believed to be
+ * 20 bits. ASSUMED, not verified against the datasheet. It only bounds the
+ * V4L2_CID_VBLANK control, and overshooting it can at worst give a wrong
+ * frame rate, never damage; the useful range is nowhere near the top.
+ */
+#define IMX415_VMAX_MAX		  0xFFFFF
+
+/*
+ * The clock HMAX and VMAX are counted in. NOT the pixel rate, and not the
+ * lane rate -- it is the sensor's internal system clock, and it is a function
+ * of INCK alone:
+ *
+ *   HMAX clock = INCK * INCKSEL4 / 84
+ *      24 MHz * 252 / 84 = 72.00  MHz   (INCKSEL4 = 0x0FC, both 24 MHz entries)
+ *      27 MHz * 231 / 84 = 74.25  MHz   (INCKSEL4 = 0x0E7, all 27 MHz entries)
+ *
+ * Derived, not quoted: every imx415_clk_params[] entry with inck == 24 MHz
+ * carries INCKSEL3 = 0x0B4 and INCKSEL4 = 0x0FC, and every 27 MHz entry
+ * carries 0x0A5..0x0C6 / 0x0E7 -- i.e. INCKSEL4 tracks INCK and nothing else.
+ * Confirmed against all three pre-existing modes, which reproduce their
+ * documented frame rates exactly as VMAX * HMAX / (this clock):
+ *
+ *   2-lane 720 : 2250 * 0x07F0(2032) / 72.00e6 = 63.500 ms = 15.748 fps
+ *   2-lane 1440: 2250 * 0x042A(1066) / 72.00e6 = 33.313 ms = 30.019 fps
+ *   4-lane 891 : 2250 * 0x044C(1100) / 74.25e6 = 33.333 ms = 30.000 fps
+ *
+ * This board runs a 24 MHz INCK (see overlays/camera-overlay.dts), so every
+ * timing figure quoted in this file is against 72 MHz.
+ */
+#define IMX415_HMAX_CLK_24MHZ	  72000000UL
+
 #define IMX415_NUM_CLK_PARAM_REGS 11
 
 #define IMX415_REG_8BIT(n)	  ((1 << 16) | (n))
@@ -46,6 +160,8 @@
 #define IMX415_BCWAIT_TIME	  IMX415_REG_16BIT(0x3008)
 #define IMX415_CPWAIT_TIME	  IMX415_REG_16BIT(0x300A)
 #define IMX415_WINMODE		  IMX415_REG_8BIT(0x301C)
+#define IMX415_WINMODE_ALL_PIXEL  0x00
+#define IMX415_WINMODE_CROP	  0x04
 #define IMX415_ADDMODE		  IMX415_REG_8BIT(0x3022)
 #define IMX415_REVERSE		  IMX415_REG_8BIT(0x3030)
 #define IMX415_HREVERSE_SHIFT	  (0)
@@ -57,6 +173,36 @@
 #define IMX415_DRV		  IMX415_REG_8BIT(0x30C1)
 #define IMX415_VMAX		  IMX415_REG_24BIT(0x3024)
 #define IMX415_HMAX		  IMX415_REG_16BIT(0x3028)
+/*
+ * radxa-zero2pro-camera: window-cropping window registers.
+ *
+ * !!! UNVERIFIED ADDRESSES !!!  These four 16-bit pairs are the IMX415's
+ * cropping window (PIX_HST / PIX_HWIDTH / PIX_VST / PIX_VWIDTH). They are NOT
+ * used by mainline and could not be checked against the datasheet, which this
+ * port does not have. They are taken from the Sony IMX415 register map as it
+ * appears in vendor/BSP driver sources, which agree on:
+ *
+ *   0x3040/0x3041  PIX_HST[12:0]     horizontal window start, pixels
+ *   0x3042/0x3043  PIX_HWIDTH[12:0]  horizontal window width, pixels
+ *   0x3044/0x3045  PIX_VST[10:0]     vertical window start, lines
+ *   0x3046/0x3047  PIX_VWIDTH[10:0]  vertical window width, lines
+ *
+ * All are little-endian byte pairs, which is what IMX415_REG_16BIT() emits
+ * (imx415_write() puts the low byte at the named address). The high bytes
+ * carry only the top few bits; the values programmed here are always in range
+ * for the pixel array, so no masking is done.
+ *
+ * VALIDATE THESE ON HARDWARE BEFORE TRUSTING CROPPED OUTPUT. The failure mode
+ * if an address is wrong is a garbled or black frame, not damage: 0x3040-0x3047
+ * is inside the sensor's normal mode-setting register block, and every register
+ * this driver writes is a mode register written while the sensor is in standby.
+ * The all-pixel path is unaffected either way -- it writes WINMODE = 0 and
+ * touches none of these.
+ */
+#define IMX415_PIX_HST		  IMX415_REG_16BIT(0x3040)
+#define IMX415_PIX_HWIDTH	  IMX415_REG_16BIT(0x3042)
+#define IMX415_PIX_VST		  IMX415_REG_16BIT(0x3044)
+#define IMX415_PIX_VWIDTH	  IMX415_REG_16BIT(0x3046)
 #define IMX415_SHR0		  IMX415_REG_24BIT(0x3050)
 #define IMX415_GAIN_PCG_0	  IMX415_REG_16BIT(0x3090)
 #define IMX415_AGAIN_MIN	  0
@@ -248,6 +394,87 @@ static const struct imx415_reg imx415_mode_4_891[] = {
 	{ IMX415_TLPX, 0x002F },
 };
 
+/*
+ * radxa-zero2pro-camera: all-pixel 4-lane 1440 Mbps 60.038 Hz mode. NEW, not
+ * in mainline. This is the mode this board actually wants: it halves the
+ * rolling-shutter skew of the 2-lane 1440 mode (32.45 ms -> 16.23 ms) and
+ * doubles the frame rate, using hardware that is already wired.
+ *
+ * ------------------------- why this is reachable -------------------------
+ * The overlay used to claim 4-lane was out of reach because imx415's only
+ * 4-lane mode (891 Mbps) needs a 27 MHz INCK and this board gives 24 MHz.
+ * That conflates two independent things. imx415_clk_params[] is keyed on
+ * (lane_rate, inck) ONLY -- see imx415_check_inck() and the lookup at the end
+ * of imx415_parse_hw_config(); lane count never enters it -- and
+ * imx415_set_mode() writes the clk_params block verbatim after the mode's own
+ * register list. So a 4-lane mode at an already-supported lane rate needs no
+ * new INCK settings at all. The 1440 Mbps @ 24 MHz entry is present and is
+ * proven working on this board today at 2 lanes.
+ *
+ * Corroboration from Sony's own mode list (the table below this comment):
+ * "1440 / 2 lanes / 30.019 / 4510 / 304615385" and
+ * "1440 / 4 lanes / 30.019 / 4510 / 304615385" are the same line twice with a
+ * different lane count -- identical hmax_pix and identical pixel_rate, i.e.
+ * identical HMAX and identical system clock. Lane count does not move the
+ * timing base.
+ *
+ * ---------------------------- deriving HMAX ------------------------------
+ * frame period = VMAX * HMAX / 72e6 (see IMX415_HMAX_CLK_24MHZ above for why
+ * 72e6, and for the check that this reproduces all three existing modes).
+ * VMAX stays 0x08CA = 2250 = 2192 active + 58 blank.
+ *
+ *   HMAX = 72e6 / (60.0375 * 2250) = 533   -> 0x0215
+ *
+ * Cross-check against the documented table row "1440 / 4 / 60.038 / 4510 /
+ * 609230769", using the identity that makes hmax_pix/pixel_rate consistent
+ * with the real register (both describe the same line period):
+ *
+ *   pixel_rate = hmax_pix * 72e6 / HMAX = 4510 * 72e6 / 533 = 609230769.2
+ *
+ * which truncates to exactly the documented 609230769. And
+ * 72e6 / (2250 * 533) = 60.0375 fps, i.e. the documented "60.038". Two
+ * independent derivations agree, and the same method reproduces HMAX for all
+ * three pre-existing modes (2032, 1066, 1100). HMAX = 533.
+ *
+ * NOTE: 550 would be the answer if the system clock were 74.25 MHz. It is not,
+ * at a 24 MHz INCK -- 74.25 MHz is the 27 MHz-INCK value, which is where the
+ * 4-lane 891 mode's HMAX of 1100 comes from. 550 reproduces neither the
+ * documented fps nor the documented pixel_rate.
+ *
+ * -------------------------- MIPI feasibility -----------------------------
+ * One line is 3864 px * 10 bit = 38640 bits. 4 lanes * 1440 Mbps = 5760 Mbps.
+ *
+ *   payload time  = 38640 / 5.76e9   = 6.708 us
+ *   line period   = 533 / 72e6       = 7.403 us
+ *   margin        = 0.694 us          (90.6 % link utilisation)
+ *
+ * That is tight, but it is EXACTLY the utilisation the working 2-lane 1440
+ * mode already runs at (13.417 us payload in a 14.806 us line = 90.6 %) --
+ * both halves of the ratio doubled. Sony ships this mode, so the packet
+ * overhead fits in the same 9.4 %.
+ *
+ * ----------------------------- D-PHY timings -----------------------------
+ * TCLKPOST..TLPX are copied verbatim from imx415_mode_2_1440. They are a
+ * function of the lane RATE (they are unit-interval counts), not the lane
+ * count: across the three existing modes TLPX runs 39 / 47 / 79 for
+ * 720 / 891 / 1440 Mbps -- linear in lane rate, and the 891 entry is the
+ * 4-lane one, sitting on the same line as the two 2-lane entries.
+ */
+static const struct imx415_reg imx415_mode_4_1440[] = {
+	{ IMX415_VMAX, 0x08CA },
+	{ IMX415_HMAX, 0x0215 },
+	{ IMX415_LANEMODE, IMX415_LANEMODE_4 },
+	{ IMX415_TCLKPOST, 0x009F },
+	{ IMX415_TCLKPREPARE, 0x0057 },
+	{ IMX415_TCLKTRAIL, 0x0057 },
+	{ IMX415_TCLKZERO, 0x0187 },
+	{ IMX415_THSPREPARE, 0x005F },
+	{ IMX415_THSZERO, 0x00A7 },
+	{ IMX415_THSTRAIL, 0x005F },
+	{ IMX415_THSEXIT, 0x0097 },
+	{ IMX415_TLPX, 0x004F },
+};
+
 struct imx415_mode_reg_list {
 	u32 num_of_regs;
 	const struct imx415_reg *regs;
@@ -321,6 +548,24 @@ static const struct imx415_mode supported_modes[] = {
 			.regs = imx415_mode_4_891,
 		},
 	},
+	/*
+	 * radxa-zero2pro-camera: the fast mode. Selected by
+	 * data-lanes = <1 2 3 4> + link-frequencies = 720000000 in the overlay;
+	 * imx415_parse_hw_config() matches on (lanes, lane_rate), and this is
+	 * only entry with (4, 1440000000), so there is no ambiguity with the
+	 * 2-lane 1440 entry above. See imx415_mode_4_1440[] for the derivation
+	 * of every number here.
+	 */
+	{
+		.lane_rate = 1440000000,
+		.lanes = 4,
+		.hmax_pix = 4510,
+		.pixel_rate = 609230769,
+		.reg_list = {
+			.num_of_regs = ARRAY_SIZE(imx415_mode_4_1440),
+			.regs = imx415_mode_4_1440,
+		},
+	},
 };
 
 static const struct regmap_config imx415_regmap_config = {
@@ -359,9 +604,30 @@ struct imx415 {
 	struct media_pad pad;
 
 	struct v4l2_ctrl_handler ctrls;
+	struct v4l2_ctrl *exposure;
+	struct v4l2_ctrl *hblank;
 	struct v4l2_ctrl *vblank;
 	struct v4l2_ctrl *hflip;
 	struct v4l2_ctrl *vflip;
+
+	/*
+	 * radxa-zero2pro-camera: the VMAX currently programmed (or about to
+	 * be),
+	 * i.e. readout lines + vertical blanking.
+	 *
+	 * Cached rather than recomputed from (format->height + vblank->cur.val)
+	 * at every use, because of a v4l2-ctrls ordering trap: inside a
+	 * control's
+	 * own s_ctrl() its ->cur.val is still the OLD value (new_to_cur() runs
+	 * after s_ctrl() returns). Updating VBLANK re-publishes the EXPOSURE
+	 * range, and __v4l2_ctrl_modify_range() re-enters s_ctrl() for EXPOSURE
+	 * if the clamp moved the value -- which would then have read a stale
+	 * vblank and written an SHR0 inconsistent with the VMAX programmed
+	 * in the very same call. The VBLANK handler updates this field first,
+	 * so
+	 * everything downstream sees one coherent VMAX.
+	 */
+	unsigned int cur_vmax;
 
 	unsigned int cur_mode;
 	unsigned int num_data_lanes;
@@ -534,6 +800,60 @@ static int imx415_set_testpattern(struct imx415 *sensor, int val)
 	return 0;
 }
 
+/*
+ * radxa-zero2pro-camera: re-publish the EXPOSURE range for the current VMAX.
+ *
+ * Must be called with the control handler lock held -- which, in this driver,
+ * is the same mutex as the subdev state lock (see imx415_subdev_init()). Hence
+ * the __-prefixed, caller-locks variant.
+ */
+static void imx415_update_exposure_range(struct imx415 *sensor)
+{
+	u32 max = sensor->cur_vmax - IMX415_SHR0_MIN;
+
+	__v4l2_ctrl_modify_range(sensor->exposure, IMX415_EXPOSURE_MIN, max, 1,
+				 max);
+}
+
+/*
+ * radxa-zero2pro-camera: re-publish the blanking + exposure ranges after the
+ * readout window changed. Same locking rule as above.
+ */
+static void imx415_update_geometry_ctrls(struct imx415 *sensor, u32 width,
+					 u32 height)
+{
+	u32 hblank = supported_modes[sensor->cur_mode].hmax_pix - width;
+
+	/*
+	 * HBLANK stays READ_ONLY -- HMAX is owned by the mode register list and
+	 * is not a runtime knob here (see the note above imx415_set_window()).
+	 * Its *value* still has to track the crop width, because userspace and
+	 * the ISP bridge compute the frame rate as
+	 *
+	 *   fps = pixel_rate / ((width + hblank) * (height + vblank))
+	 *
+	 * and that only comes out right while (width + hblank) == hmax_pix.
+	 */
+	__v4l2_ctrl_modify_range(sensor->hblank, hblank, hblank, 1, hblank);
+
+	/*
+	 * VBLANK's minimum is the sensor's fixed 58 lines of vertical blanking;
+	 * its maximum is whatever still fits in VMAX. Cropping does not change
+	 * the minimum, only how many active lines it is added to.
+	 */
+	__v4l2_ctrl_modify_range(sensor->vblank, IMX415_PIXEL_ARRAY_VBLANK,
+				 IMX415_VMAX_MAX - height, 1,
+				 IMX415_PIXEL_ARRAY_VBLANK);
+
+	/*
+	 * Read vblank->cur.val back rather than assuming the default: a user
+	 * value set before the crop survives, clamped into the new range by the
+	 * modify_range above.
+	 */
+	sensor->cur_vmax = height + sensor->vblank->cur.val;
+	imx415_update_exposure_range(sensor);
+}
+
 static int imx415_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct imx415 *sensor = container_of(ctrl->handler, struct imx415,
@@ -542,19 +862,84 @@ static int imx415_s_ctrl(struct v4l2_ctrl *ctrl)
 	struct v4l2_subdev_state *state;
 	unsigned int vmax;
 	unsigned int flip;
+	int ret;
 
-	if (!sensor->streaming)
+	/*
+	 * radxa-zero2pro-camera: the state accessors below dereference
+	 * sd->active_state unconditionally, and that only exists from
+	 * v4l2_subdev_init_finalize() onwards. Mainline got away without this
+	 * guard because the !streaming early-return came first; VBLANK now has
+	 * work to do while not streaming, so the guard has to be explicit.
+	 */
+	if (!sensor->subdev.active_state)
 		return 0;
 
 	state = v4l2_subdev_get_locked_active_state(&sensor->subdev);
 	format = v4l2_subdev_get_pad_format(&sensor->subdev, state, 0);
 
+	/*
+	 * radxa-zero2pro-camera: VBLANK is handled before the !streaming
+	 * early-return because it moves the EXPOSURE ceiling, which has to be
+	 * visible to userspace (and to the ISP bridge, which reads the EXPOSURE
+	 * control's min/max in sensor_update_parameters()) whether or not
+	 * pixels
+	 * are flowing.
+	 *
+	 * Note VBLANK only makes the sensor SLOWER: it adds idle lines after
+	 * the
+	 * frame, so it lengthens the frame period without changing the line
+	 * period, i.e. it costs frame rate and buys nothing in rolling-shutter
+	 * skew. It exists as a debugging lever (back off the frame rate to see
+	 * whether a problem is receiver bandwidth) and to let the AE loop reach
+	 * longer exposures. Cropping, not VBLANK, is the lever for going
+	 * faster.
+	 */
+	if (ctrl->id == V4L2_CID_VBLANK) {
+		/* ctrl->val, not sensor->vblank->cur.val -- see cur_vmax. */
+		sensor->cur_vmax = format->height + ctrl->val;
+
+		if (sensor->streaming) {
+			ret = imx415_write(sensor, IMX415_VMAX,
+					   sensor->cur_vmax);
+			if (ret)
+				return ret;
+		}
+
+		imx415_update_exposure_range(sensor);
+		return 0;
+	}
+
+	if (!sensor->streaming)
+		return 0;
+
 	switch (ctrl->id) {
 	case V4L2_CID_EXPOSURE:
-		/* clamp the exposure value to VMAX. */
-		vmax = format->height + sensor->vblank->cur.val;
-		ctrl->val = min_t(int, ctrl->val, vmax);
+		/*
+		 * radxa-zero2pro-camera: clamp against the cached VMAX (see
+		 * cur_vmax), and clamp to VMAX - IMX415_SHR0_MIN rather than to
+		 * VMAX. Mainline's min_t(int, ctrl->val, vmax) allowed
+		 * SHR0 == 0, which is below the sensor's minimum and would be
+		 * rejected or produce a corrupt frame.
+		 */
+		vmax = sensor->cur_vmax;
+		ctrl->val = clamp_t(int, ctrl->val, IMX415_EXPOSURE_MIN,
+				    (int)vmax - IMX415_SHR0_MIN);
 		return imx415_write(sensor, IMX415_SHR0, vmax - ctrl->val);
+
+	case V4L2_CID_HBLANK:
+	case V4L2_CID_LINK_FREQ:
+		/*
+		 * radxa-zero2pro-camera: read-only informational controls.
+		 * __v4l2_ctrl_handler_setup() skips READ_ONLY controls, so
+		 * mainline never saw these here -- but
+		 * __v4l2_ctrl_modify_range() does NOT skip them: it re-enters
+		 * s_ctrl() whenever the clamped value actually moves. HBLANK's
+		 * value moves on every crop change, so without this case it
+		 * would fall through to -EINVAL and fail set_fmt().
+		 * There is nothing to program: HMAX comes from the mode's
+		 * register list.
+		 */
+		return 0;
 
 	case V4L2_CID_ANALOGUE_GAIN:
 		/* analogue gain in 0.3 dB step size */
@@ -585,10 +970,21 @@ static int imx415_ctrls_init(struct imx415 *sensor)
 	u64 pixel_rate = supported_modes[sensor->cur_mode].pixel_rate;
 	u64 lane_rate = supported_modes[sensor->cur_mode].lane_rate;
 	u32 exposure_max = IMX415_PIXEL_ARRAY_HEIGHT +
-			   IMX415_PIXEL_ARRAY_VBLANK - 8;
+			   IMX415_PIXEL_ARRAY_VBLANK - IMX415_SHR0_MIN;
 	u32 hblank;
 	unsigned int i;
 	int ret;
+
+	/*
+	 * radxa-zero2pro-camera: seed the cached VMAX for the default all-pixel
+	 * geometry. imx415_init_cfg() runs later and sets the same value, but
+	 * it
+	 * goes through imx415_set_format() with which == 0 (== _FORMAT_TRY), so
+	 * it deliberately does not touch controls; this has to be right before
+	 * any s_ctrl() can run.
+	 */
+	sensor->cur_vmax = IMX415_PIXEL_ARRAY_HEIGHT +
+			   IMX415_PIXEL_ARRAY_VBLANK;
 
 	ret = v4l2_fwnode_device_parse(sensor->dev, &props);
 	if (ret < 0)
@@ -614,8 +1010,31 @@ static int imx415_ctrls_init(struct imx415 *sensor)
 	if (ctrl)
 		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
-	v4l2_ctrl_new_std(&sensor->ctrls, &imx415_ctrl_ops, V4L2_CID_EXPOSURE,
-			  4, exposure_max, 1, exposure_max);
+	/*
+	 * radxa-zero2pro-camera: VBLANK is created BEFORE EXPOSURE now.
+	 * __v4l2_ctrl_handler_setup() walks the handler in creation order, and
+	 * VBLANK is no longer READ_ONLY, so it is now actually applied at
+	 * stream-on. Programming VMAX before SHR0 keeps the pair consistent at
+	 * every instant instead of relying on the fact that both happen while
+	 * the sensor is still in standby.
+	 *
+	 * The range is real rather than pinned at 58: 58 is the sensor's
+	 * *minimum* vertical blanking, not a fixed value, and being able to
+	 * lengthen the frame period at runtime is the cheapest way to test
+	 * whether a capture problem is receiver bandwidth. Maximum is whatever
+	 * still fits in VMAX for the current readout height.
+	 */
+	sensor->vblank = v4l2_ctrl_new_std(&sensor->ctrls, &imx415_ctrl_ops,
+					   V4L2_CID_VBLANK,
+					   IMX415_PIXEL_ARRAY_VBLANK,
+					   IMX415_VMAX_MAX -
+						   IMX415_PIXEL_ARRAY_HEIGHT,
+					   1, IMX415_PIXEL_ARRAY_VBLANK);
+
+	sensor->exposure = v4l2_ctrl_new_std(&sensor->ctrls, &imx415_ctrl_ops,
+					     V4L2_CID_EXPOSURE,
+					     IMX415_EXPOSURE_MIN, exposure_max,
+					     1, exposure_max);
 
 	v4l2_ctrl_new_std(&sensor->ctrls, &imx415_ctrl_ops,
 			  V4L2_CID_ANALOGUE_GAIN, IMX415_AGAIN_MIN,
@@ -624,18 +1043,11 @@ static int imx415_ctrls_init(struct imx415 *sensor)
 
 	hblank = supported_modes[sensor->cur_mode].hmax_pix -
 		 IMX415_PIXEL_ARRAY_WIDTH;
-	ctrl = v4l2_ctrl_new_std(&sensor->ctrls, &imx415_ctrl_ops,
-				 V4L2_CID_HBLANK, hblank, hblank, 1, hblank);
-	if (ctrl)
-		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
-
-	sensor->vblank = v4l2_ctrl_new_std(&sensor->ctrls, &imx415_ctrl_ops,
-					   V4L2_CID_VBLANK,
-					   IMX415_PIXEL_ARRAY_VBLANK,
-					   IMX415_PIXEL_ARRAY_VBLANK, 1,
-					   IMX415_PIXEL_ARRAY_VBLANK);
-	if (sensor->vblank)
-		sensor->vblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+	sensor->hblank = v4l2_ctrl_new_std(&sensor->ctrls, &imx415_ctrl_ops,
+					   V4L2_CID_HBLANK, hblank, hblank, 1,
+					   hblank);
+	if (sensor->hblank)
+		sensor->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
 	/*
 	 * The pixel rate used here is a virtual value and can be used for
@@ -697,6 +1109,113 @@ static int imx415_set_mode(struct imx415 *sensor, int mode)
 	return 0;
 }
 
+/*
+ * radxa-zero2pro-camera: program the readout window and the matching VMAX.
+ * NEW, not in mainline (mainline only ever reads the full array).
+ *
+ * ======================= why this is the big win =========================
+ * Rolling-shutter skew is (lines read out) * (line period). The line period is
+ * HMAX / 72e6 and is fixed by the mode. So cutting the number of lines cuts
+ * the skew proportionally -- and because VMAX shrinks with it, it raises the
+ * frame rate by the same factor. For a shot trainer, both of those are the
+ * whole point; the discarded rows cost nothing since the target occupies a
+ * small part of the frame.
+ *
+ * On the 4-lane 1440 mode (line period 7.403 us):
+ *
+ *   window        VMAX  frame period     fps      skew
+ *   3864 x 2192   2250    16.656 ms    60.04    16.227 ms
+ *   1920 x 1080   1138     8.424 ms   118.70     7.995 ms
+ *   1920 x  512    570     4.220 ms   236.99     3.790 ms
+ *
+ * On the 2-lane 1440 mode this board runs today (line period 14.806 us),
+ * cropping alone -- no overlay change, no lane change -- already gives:
+ *
+ *   3864 x 2192   2250    33.313 ms    30.02    32.454 ms   (today)
+ *   1920 x 1080   1138    16.849 ms    59.35    15.990 ms
+ *   1920 x  512    570     8.439 ms   118.50     7.580 ms
+ *
+ * ================= why horizontal cropping does not help =================
+ * HMAX is a programmed line PERIOD, not a consequence of the line width, so
+ * narrowing the window does not shorten the line -- it only frees MIPI
+ * bandwidth (a 1920-px line needs 3.33 us of a 7.40 us line period at 4 lanes,
+ * 45 % utilisation, versus 90.6 % at full width) and reduces the pixel volume
+ * the ISP has to chew through. Horizontal cropping is supported because it is
+ * free to support and it does buy those two things, but every skew figure
+ * above depends only on the height.
+ *
+ * There IS a further factor-of-1.5 available by shrinking HMAX once the line
+ * is narrower, which would shorten the line period itself. It is deliberately
+ * NOT done here: the sensor's minimum HMAX is a datasheet number this port
+ * does not have. The only bound available is empirical -- Sony's own mode list
+ * (the table above struct imx415_mode) contains a 4-lane 2376 Mbps mode with
+ * hmax_pix 4392 at 90.164 fps, i.e. HMAX = 366 at 74.25 MHz = 4.93 us, so the
+ * analog front end sustains at least a 4.93 us line. Scaled to this board's
+ * 72 MHz that is HMAX >= 355 against the 533 used here. Exploiting it means
+ * making V4L2_CID_HBLANK writable and clamping HMAX at max(355, MIPI payload
+ * time); that is a hardware-validation job, not a by-construction one.
+ *
+ * ========================== the VMAX floor ===============================
+ * VMAX = readout height + vertical blanking, blanking >= 58 lines. The 58 is
+ * mainline's IMX415_PIXEL_ARRAY_VBLANK and is confirmed by the existing modes
+ * (2192 + 58 = 2250 = 0x08CA). ASSUMED, and the main thing to check on
+ * hardware: that 58 remains sufficient in cropping mode, and that there is no
+ * separate absolute VMAX floor that a 570-line frame would violate. If a
+ * cropped mode produces broken frames, raising V4L2_CID_VBLANK is the first
+ * thing to try.
+ */
+static int imx415_set_window(struct imx415 *sensor,
+			     struct v4l2_subdev_state *state)
+{
+	const struct v4l2_mbus_framefmt *format;
+	const struct v4l2_rect *crop;
+	int ret;
+
+	format = v4l2_subdev_get_pad_format(&sensor->subdev, state, 0);
+	crop = v4l2_subdev_get_pad_crop(&sensor->subdev, state, 0);
+
+	if (crop->width == IMX415_PIXEL_ARRAY_WIDTH &&
+	    crop->height == IMX415_PIXEL_ARRAY_HEIGHT) {
+		/*
+		 * Full array: stay in all-pixel mode rather than programming a
+		 * full-size crop window. imx415_init_table[] already wrote
+		 * WINMODE = 0, but write it again so that a stream_off/crop/
+		 * stream_on cycle cannot leave the cropping mode latched.
+		 */
+		ret = imx415_write(sensor, IMX415_WINMODE,
+				   IMX415_WINMODE_ALL_PIXEL);
+		if (ret)
+			return ret;
+	} else {
+		ret = imx415_write(sensor, IMX415_PIX_HST, crop->left);
+		if (ret)
+			return ret;
+		ret = imx415_write(sensor, IMX415_PIX_HWIDTH, crop->width);
+		if (ret)
+			return ret;
+		ret = imx415_write(sensor, IMX415_PIX_VST, crop->top);
+		if (ret)
+			return ret;
+		ret = imx415_write(sensor, IMX415_PIX_VWIDTH, crop->height);
+		if (ret)
+			return ret;
+		ret = imx415_write(sensor, IMX415_WINMODE, IMX415_WINMODE_CROP);
+		if (ret)
+			return ret;
+	}
+
+	/*
+	 * Overrides the VMAX from the mode's register list (which always states
+	 * the all-pixel 0x08CA). Recomputed here rather than trusted from
+	 * cur_vmax so that a stream-on after a TRY-only format, or after a
+	 * control range clamp, cannot program a VMAX that disagrees with the
+	 * window actually being read out.
+	 */
+	sensor->cur_vmax = format->height + sensor->vblank->cur.val;
+
+	return imx415_write(sensor, IMX415_VMAX, sensor->cur_vmax);
+}
+
 static int imx415_setup(struct imx415 *sensor, struct v4l2_subdev_state *state)
 {
 	unsigned int i;
@@ -709,7 +1228,17 @@ static int imx415_setup(struct imx415 *sensor, struct v4l2_subdev_state *state)
 			return ret;
 	}
 
-	return imx415_set_mode(sensor, sensor->cur_mode);
+	ret = imx415_set_mode(sensor, sensor->cur_mode);
+	if (ret)
+		return ret;
+
+	/*
+	 * radxa-zero2pro-camera: after the mode list, so that the window's VMAX
+	 * wins over the mode's all-pixel default. The controls applied by
+	 * __v4l2_ctrl_handler_setup() in imx415_s_stream() run after this and
+	 * will program the same VMAX again from the same cur_vmax.
+	 */
+	return imx415_set_window(sensor, state);
 }
 
 static int imx415_wakeup(struct imx415 *sensor)
@@ -835,10 +1364,15 @@ static int imx415_enum_frame_size(struct v4l2_subdev *sd,
 	if (fse->index > 0 || fse->code != format->code)
 		return -EINVAL;
 
-	fse->min_width = IMX415_PIXEL_ARRAY_WIDTH;
-	fse->max_width = fse->min_width;
-	fse->min_height = IMX415_PIXEL_ARRAY_HEIGHT;
-	fse->max_height = fse->min_height;
+	/*
+	 * radxa-zero2pro-camera: a continuous range now, not a single size --
+	 * any window between the crop minimum and the full array can be read
+	 * out. imx415_set_format() aligns whatever is asked for.
+	 */
+	fse->min_width = IMX415_CROP_MIN_WIDTH;
+	fse->max_width = IMX415_PIXEL_ARRAY_WIDTH;
+	fse->min_height = IMX415_CROP_MIN_HEIGHT;
+	fse->max_height = IMX415_PIXEL_ARRAY_HEIGHT;
 	return 0;
 }
 
@@ -851,24 +1385,92 @@ static int imx415_get_format(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int imx415_set_format(struct v4l2_subdev *sd,
-			     struct v4l2_subdev_state *state,
-			     struct v4l2_subdev_format *fmt)
+/*
+ * radxa-zero2pro-camera: fill in the fixed half of a media bus format. The
+ * Bayer order stays SGBRG10 for every crop this driver will accept, because
+ * both crop alignments are even (see IMX415_CROP_*_ALIGN) -- an odd left or
+ * top would shift the Bayer phase and make this code lie.
+ */
+static void imx415_fill_format(struct v4l2_mbus_framefmt *format, u32 width,
+			       u32 height)
 {
-	struct v4l2_mbus_framefmt *format;
-
-	format = v4l2_subdev_get_pad_format(sd, state, fmt->pad);
-
-	format->width = fmt->format.width;
-	format->height = fmt->format.height;
+	format->width = width;
+	format->height = height;
 	format->code = MEDIA_BUS_FMT_SGBRG10_1X10;
 	format->field = V4L2_FIELD_NONE;
 	format->colorspace = V4L2_COLORSPACE_RAW;
 	format->ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
 	format->quantization = V4L2_QUANTIZATION_DEFAULT;
 	format->xfer_func = V4L2_XFER_FUNC_NONE;
+}
 
+/*
+ * radxa-zero2pro-camera: set_fmt now selects a CENTRED CROP, where mainline
+ * only ever had one geometry and copied the requested size through unchecked.
+ *
+ * Why the crop rides on set_fmt rather than living only behind
+ * .set_selection: the consumer on this board is the ISP bridge
+ * (isp-module/src/driver/sensor/V4L2_drv.c), which configures the sensor with
+ * exactly one call -- v4l2_subdev_call(pad, set_fmt) -- and never touches the
+ * selection API. Making set_fmt mean "give me a window this size, centred"
+ * means the ROI is reachable by changing two #defines in that bridge, with no
+ * new call into the driver. .set_selection is implemented too, for the general
+ * case where the caller wants an off-centre window, and it is the canonical
+ * interface; set_fmt is the convenience path that happens to be the one this
+ * board uses.
+ *
+ * The alternative -- extra cropped entries in supported_modes[] -- fits this
+ * driver badly. supported_modes[] is indexed once at probe by
+ * imx415_parse_hw_config(), keyed on (lanes, lane_rate) from the devicetree,
+ * and sensor->cur_mode never changes afterwards; two entries sharing a
+ * (lanes, lane_rate) pair would be indistinguishable to that lookup. Keeping
+ * supported_modes[] meaning "link + timing configuration" and treating the
+ * window as an orthogonal runtime property leaves both concepts clean and
+ * lets any window compose with any link mode.
+ */
+static int imx415_set_format(struct v4l2_subdev *sd,
+			     struct v4l2_subdev_state *state,
+			     struct v4l2_subdev_format *fmt)
+{
+	struct imx415 *sensor = to_imx415(sd);
+	struct v4l2_mbus_framefmt *format;
+	struct v4l2_rect *crop;
+	u32 width, height;
+
+	/* Round the request up to the alignment, then into the array. */
+	width = clamp_t(u32, ALIGN(fmt->format.width, IMX415_CROP_WIDTH_ALIGN),
+			IMX415_CROP_MIN_WIDTH, IMX415_PIXEL_ARRAY_WIDTH);
+	height = clamp_t(u32,
+			 ALIGN(fmt->format.height, IMX415_CROP_HEIGHT_ALIGN),
+			 IMX415_CROP_MIN_HEIGHT, IMX415_PIXEL_ARRAY_HEIGHT);
+
+	format = v4l2_subdev_get_pad_format(sd, state, fmt->pad);
+	crop = v4l2_subdev_get_pad_crop(sd, state, fmt->pad);
+
+	crop->width = width;
+	crop->height = height;
+	crop->left = ALIGN_DOWN((IMX415_PIXEL_ARRAY_WIDTH - width) / 2,
+			       IMX415_CROP_LEFT_ALIGN);
+	crop->top = ALIGN_DOWN((IMX415_PIXEL_ARRAY_HEIGHT - height) / 2,
+			      IMX415_CROP_TOP_ALIGN);
+
+	imx415_fill_format(format, width, height);
 	fmt->format = *format;
+
+	/*
+	 * Only the ACTIVE format owns the controls; a TRY format is scratch
+	 * state. This also keeps imx415_init_cfg() -- which calls in with a
+	 * zeroed struct, so which == 0 == V4L2_SUBDEV_FORMAT_TRY -- from
+	 * touching controls before v4l2_subdev_init_finalize() has finished.
+	 *
+	 * The control handler lock and the subdev state lock are the same mutex
+	 * in this driver (imx415_subdev_init()), and the state is locked around
+	 * every set_fmt path, so the __-prefixed range helpers are correct
+	 * here.
+	 */
+	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE)
+		imx415_update_geometry_ctrls(sensor, width, height);
+
 	return 0;
 }
 
@@ -878,8 +1480,17 @@ static int imx415_get_selection(struct v4l2_subdev *sd,
 {
 	switch (sel->target) {
 	case V4L2_SEL_TGT_CROP:
+		/*
+		 * radxa-zero2pro-camera: the live window, not the array.
+		 * Mainline returned the full array for all three targets
+		 * because it could not crop.
+		 */
+		sel->r = *v4l2_subdev_get_pad_crop(sd, sd_state, sel->pad);
+		return 0;
+
 	case V4L2_SEL_TGT_CROP_DEFAULT:
 	case V4L2_SEL_TGT_CROP_BOUNDS:
+	case V4L2_SEL_TGT_NATIVE_SIZE:
 		sel->r.top = IMX415_PIXEL_ARRAY_TOP;
 		sel->r.left = IMX415_PIXEL_ARRAY_LEFT;
 		sel->r.width = IMX415_PIXEL_ARRAY_WIDTH;
@@ -889,6 +1500,54 @@ static int imx415_get_selection(struct v4l2_subdev *sd,
 	}
 
 	return -EINVAL;
+}
+
+/*
+ * radxa-zero2pro-camera: NEW. Arbitrary (not necessarily centred) window.
+ * The format follows the crop 1:1 -- there is no scaler or binner in play
+ * here, so the output size is the window size.
+ */
+static int imx415_set_selection(struct v4l2_subdev *sd,
+				struct v4l2_subdev_state *sd_state,
+				struct v4l2_subdev_selection *sel)
+{
+	struct imx415 *sensor = to_imx415(sd);
+	struct v4l2_mbus_framefmt *format;
+	struct v4l2_rect *crop;
+	u32 width, height;
+
+	if (sel->target != V4L2_SEL_TGT_CROP)
+		return -EINVAL;
+
+	width = clamp_t(u32, ALIGN(sel->r.width, IMX415_CROP_WIDTH_ALIGN),
+			IMX415_CROP_MIN_WIDTH, IMX415_PIXEL_ARRAY_WIDTH);
+	height = clamp_t(u32, ALIGN(sel->r.height, IMX415_CROP_HEIGHT_ALIGN),
+			 IMX415_CROP_MIN_HEIGHT, IMX415_PIXEL_ARRAY_HEIGHT);
+
+	crop = v4l2_subdev_get_pad_crop(sd, sd_state, sel->pad);
+
+	crop->width = width;
+	crop->height = height;
+	/*
+	 * Clamp the origin so the window stays inside the array, then align it
+	 * DOWN -- aligning up could push it back out.
+	 */
+	crop->left = ALIGN_DOWN(clamp_t(s32, sel->r.left, 0,
+					IMX415_PIXEL_ARRAY_WIDTH - (s32)width),
+			       IMX415_CROP_LEFT_ALIGN);
+	crop->top = ALIGN_DOWN(clamp_t(s32, sel->r.top, 0,
+				       IMX415_PIXEL_ARRAY_HEIGHT - (s32)height),
+			      IMX415_CROP_TOP_ALIGN);
+
+	format = v4l2_subdev_get_pad_format(sd, sd_state, sel->pad);
+	imx415_fill_format(format, width, height);
+
+	sel->r = *crop;
+
+	if (sel->which == V4L2_SUBDEV_FORMAT_ACTIVE)
+		imx415_update_geometry_ctrls(sensor, width, height);
+
+	return 0;
 }
 
 static int imx415_init_cfg(struct v4l2_subdev *sd,
@@ -901,6 +1560,12 @@ static int imx415_init_cfg(struct v4l2_subdev *sd,
 		},
 	};
 
+	/*
+	 * .which is 0 == V4L2_SUBDEV_FORMAT_TRY, deliberately: this runs from
+	 * v4l2_subdev_init_finalize() and must not reach into the controls.
+	 * It still initialises the crop rectangle to the full array, which is
+	 * what imx415_set_window() needs to see for the all-pixel path.
+	 */
 	imx415_set_format(sd, state, &format);
 
 	return 0;
@@ -916,6 +1581,7 @@ static const struct v4l2_subdev_pad_ops imx415_subdev_pad_ops = {
 	.get_fmt = imx415_get_format,
 	.set_fmt = imx415_set_format,
 	.get_selection = imx415_get_selection,
+	.set_selection = imx415_set_selection,
 	.init_cfg = imx415_init_cfg,
 };
 
@@ -984,8 +1650,6 @@ static int imx415_power_on(struct imx415 *sensor)
 	 * appear on i2c until ~10 ms after XCLR release. 50 ms is used here.
 	 * NOTE: this alone does NOT make probe succeed; see README "Where it
 	 * stands". The XCLR low-pulse width turned out not to matter.
-	 * This is the only change to an otherwise verbatim copy of mainline
-	 * v6.3's imx415.c.
 	 */
 	msleep(50);
 

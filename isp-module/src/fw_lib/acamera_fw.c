@@ -69,6 +69,16 @@ void acamera_load_sw_sequence( uintptr_t isp_base, const acam_reg_t **sequence, 
 #define IRQ_ID_UNDEFINED 0xFF
 
 
+/*
+ * How many times we will try to reset the ISP out of an error condition before
+ * giving up and leaving it stopped. See acamera_fw_error_routine().
+ */
+#define ACAMERA_FW_ERROR_MAX_RETRY 3
+
+/* File scope, not function scope, so acamera_fw_init() can clear it: every
+ * fresh stream start gets a fresh budget of recovery attempts. */
+static uint32_t acamera_fw_error_count = 0;
+
 void acamera_fw_init( acamera_context_t *p_ctx )
 {
 
@@ -94,6 +104,10 @@ void acamera_fw_init( acamera_context_t *p_ctx )
     p_ctx->irq_flag = 0;
     acamera_fw_interrupts_enable( p_ctx );
     p_ctx->system_state = FW_RUN;
+
+    /* Fresh start: give the error routine a full budget of recovery attempts
+     * again (see ACAMERA_FW_ERROR_MAX_RETRY). */
+    acamera_fw_error_count = 0;
 }
 
 void acamera_fw_deinit( acamera_context_t *p_ctx )
@@ -102,34 +116,157 @@ void acamera_fw_deinit( acamera_context_t *p_ctx )
     acamera_fsm_mgr_deinit( &p_ctx->fsm_mgr );
 }
 
+/*
+ * The vendor code retries forever. On this board that is actively dangerous:
+ * when the error is persistent (a FRAME_COLLISION that repeats every frame),
+ * the retry loop re-arms a pipeline that is still mid-DMA, and within ~70 ms
+ * the resulting memory corruption SIGSEGVs systemd (PID 1) -- which kills all
+ * userspace, takes the network with it, and leaves only a physical power cycle
+ * as a way back in. Capping the retries turns an unrecoverable board hang into
+ * an ordinary failed capture that can actually be observed and debugged.
+ *
+ * Retry-capping alone is not enough. Confirmed on hardware 2026-08-05: the
+ * corruption is not a product of *cascading* resets -- it happened on ISP
+ * ERROR #1, before the retry budget was anywhere near exhausted, and this
+ * time it was bad enough to reach disk: systemd(1) aborted on a corrupted
+ * internal priority queue and the ext4 journal caught a freed-inode bitmap
+ * mismatch on the root filesystem (recovered by journal replay on next boot,
+ * but that is luck, not a guarantee). Both this crash and the original one
+ * logged "stopping isp failed" -- input_port never actually reached
+ * SAFE_STOP, fr_pipeline_busy never cleared -- immediately before the
+ * corruption. The vendor code did not treat that as a reason to stop: it
+ * force-toggled a global FSM reset and then re-armed the pipeline (SAFE_START
+ * + re-enabled interrupts + DMA writer still live) over a pipeline that was
+ * never actually quiesced. Two fixes:
+ *
+ *   1) Disable the DMA writer's own write-enable bits *before* attempting
+ *      anything else, unconditionally. This is the one step in the whole
+ *      routine that can actually stop an in-flight AXI write burst from the
+ *      writer landing on a buffer the driver is simultaneously reassigning --
+ *      "safe stop" only asks the input port state machine to wind down, it
+ *      does not touch the writer.
+ *   2) If the stop timeout is hit -- input port never reaches SAFE_STOP, or
+ *      the pipeline is still busy -- do not restart, regardless of how many
+ *      retries are left. A "successful" forced reset over a wedged pipeline
+ *      is not actually a recovery; it is the specific sequence that corrupted
+ *      memory both times this has been observed. Treat a failed stop exactly
+ *      like the retry-budget-exhausted case: leave the ISP stopped, leave
+ *      interrupts masked, leave the DMA writer disabled, and fail the capture
+ *      cleanly. The only way out is a full stream restart through
+ *      acamera_fw_init(), same as today.
+ */
 void acamera_fw_error_routine( acamera_context_t *p_ctx, uint32_t irq_mask )
 {
+    uint32_t error_count;
+    uintptr_t isp_base = p_ctx->settings.isp_base;
+    uint32_t stopped_cleanly;
+
+    error_count = ++acamera_fw_error_count;
+
+    /* First, before anything else -- including the diagnostic register reads
+     * below, which are read-only and safe regardless of ordering. This is the
+     * step that actually closes the race: it stops the writer from landing
+     * any further bus transactions on whatever buffer it currently thinks is
+     * live, independent of whether the input port ever manages to stop. */
+    acamera_isp_fr_dma_writer_frame_write_on_write( isp_base, 0 );
+    acamera_isp_fr_uv_dma_writer_frame_write_on_write( isp_base, 0 );
+
+    /*
+     * Dump the hardware's own view of why it is unhappy, before the reset
+     * clears it. The two interesting questions this answers:
+     *
+     *   wfifo_fail_full   the DMA write FIFO overflowed -- the write side
+     *                     could not drain pixels as fast as the pipe produced
+     *                     them. That is a *bandwidth* problem.
+     *   vc_size/hc_size   what geometry the ISP input port is actually
+     *                     configured for. If this disagrees with the number of
+     *                     lines the sensor really sends, the pipeline never
+     *                     sees end-of-frame, stays busy forever, and the next
+     *                     frame start collides with it. That is a *geometry*
+     *                     problem.
+     *
+     * These are mutually exclusive diagnoses and we have been guessing between
+     * them, so read them rather than theorise.
+     */
+    if ( error_count <= ACAMERA_FW_ERROR_MAX_RETRY ) {
+        LOG( LOG_CRIT, "ISP ERROR #%u: irq_mask 0x%x", (unsigned int)error_count, (unsigned int)irq_mask );
+        LOG( LOG_CRIT, "  input_port: mode_status %u hc_size0 %u vc_size %u",
+             (unsigned int)acamera_isp_input_port_mode_status_read( isp_base ),
+             (unsigned int)acamera_isp_input_port_hc_size0_read( isp_base ),
+             (unsigned int)acamera_isp_input_port_vc_size_read( isp_base ) );
+        LOG( LOG_CRIT, "  monitor: fr_pipeline_busy %u broken_frame %u dma_alarms 0x%x max_addr_delay_fr %u",
+             (unsigned int)acamera_isp_isp_global_monitor_fr_pipeline_busy_read( isp_base ),
+             (unsigned int)acamera_isp_isp_global_monitor_broken_frame_status_read( isp_base ),
+             (unsigned int)acamera_isp_isp_global_monitor_dma_alarms_read( isp_base ),
+             (unsigned int)acamera_isp_isp_global_monitor_max_address_delay_line_fr_read( isp_base ) );
+        LOG( LOG_CRIT, "  fr_y wfifo: fail_full %u fail_empty %u   fr_uv wfifo: fail_full %u fail_empty %u",
+             (unsigned int)acamera_isp_isp_global_monitor_fr_y_dma_wfifo_fail_full_read( isp_base ),
+             (unsigned int)acamera_isp_isp_global_monitor_fr_y_dma_wfifo_fail_empty_read( isp_base ),
+             (unsigned int)acamera_isp_isp_global_monitor_fr_uv_dma_wfifo_fail_full_read( isp_base ),
+             (unsigned int)acamera_isp_isp_global_monitor_fr_uv_dma_wfifo_fail_empty_read( isp_base ) );
+    }
+
     //masked all interrupts
     acamera_isp_isp_global_interrupt_mask_vector_write( 0, ISP_IRQ_DISABLE_ALL_IRQ );
     //safe stop
-    acamera_isp_input_port_mode_request_write( p_ctx->settings.isp_base, ACAMERA_ISP_INPUT_PORT_MODE_REQUEST_SAFE_STOP );
+    acamera_isp_input_port_mode_request_write( isp_base, ACAMERA_ISP_INPUT_PORT_MODE_REQUEST_SAFE_STOP );
 
     // check whether the HW is stopped or not.
     uint32_t count = 0;
-    while ( acamera_isp_input_port_mode_status_read( p_ctx->settings.isp_base ) != ACAMERA_ISP_INPUT_PORT_MODE_REQUEST_SAFE_STOP || acamera_isp_isp_global_monitor_fr_pipeline_busy_read( p_ctx->settings.isp_base ) ) {
+    stopped_cleanly = 1;
+    while ( acamera_isp_input_port_mode_status_read( isp_base ) != ACAMERA_ISP_INPUT_PORT_MODE_REQUEST_SAFE_STOP || acamera_isp_isp_global_monitor_fr_pipeline_busy_read( isp_base ) ) {
         //cannot sleep use this delay
         do {
             count++;
         } while ( count % 32 != 0 );
 
         if ( ( count >> 5 ) > 50 ) {
-            LOG( LOG_CRIT, "stopping isp failed, timeout: %u.", (unsigned int)count * 1000 );
+            /* Say *which* condition never cleared -- "stopping isp failed" on
+             * its own does not distinguish a stuck input port from a pipeline
+             * that is still draining. */
+            LOG( LOG_CRIT, "stopping isp failed, timeout: %u. mode_status %u (want %u), fr_pipeline_busy %u",
+                 (unsigned int)count * 1000,
+                 (unsigned int)acamera_isp_input_port_mode_status_read( isp_base ),
+                 (unsigned int)ACAMERA_ISP_INPUT_PORT_MODE_REQUEST_SAFE_STOP,
+                 (unsigned int)acamera_isp_isp_global_monitor_fr_pipeline_busy_read( isp_base ) );
+            stopped_cleanly = 0;
             break;
         }
     }
 
-    acamera_isp_isp_global_global_fsm_reset_write( p_ctx->settings.isp_base, 1 );
-    acamera_isp_isp_global_global_fsm_reset_write( p_ctx->settings.isp_base, 0 );
+    acamera_isp_isp_global_global_fsm_reset_write( isp_base, 1 );
+    acamera_isp_isp_global_global_fsm_reset_write( isp_base, 0 );
+
+    if ( error_count > ACAMERA_FW_ERROR_MAX_RETRY || !stopped_cleanly ) {
+        /*
+         * Either the retry budget is exhausted, or the input port never
+         * actually reached SAFE_STOP -- confirmed on hardware to be the exact
+         * precondition of a memory-corrupting restart (see the block comment
+         * above this function). Leave interrupts masked, the input port
+         * stopped, and the DMA writer disabled: the pipeline stays quiet and
+         * the capture fails cleanly instead of taking the whole system down.
+         * Recovering needs a stream restart, which re-runs acamera_fw_init()
+         * and clears this counter.
+         */
+        LOG( LOG_CRIT, "ISP error routine giving up (error_count %u, stopped_cleanly %u) -- "
+                       "leaving ISP and DMA writer stopped. Capture will fail; this is "
+                       "deliberate, see acamera_fw_error_routine().",
+             (unsigned int)error_count, (unsigned int)stopped_cleanly );
+        return;
+    }
 
     //return the interrupts
     acamera_isp_isp_global_interrupt_mask_vector_write( 0, ISP_IRQ_MASK_VECTOR );
 
-    acamera_isp_input_port_mode_request_write( p_ctx->settings.isp_base, ACAMERA_ISP_INPUT_PORT_MODE_REQUEST_SAFE_START );
+    acamera_isp_input_port_mode_request_write( isp_base, ACAMERA_ISP_INPUT_PORT_MODE_REQUEST_SAFE_START );
+
+    /* Deliberately not re-enabling the DMA writer here. dma_writer_pipe_update()
+     * (dma_writer.c) already re-enables both write-on bits unconditionally,
+     * every frame-start, once it has a valid empty frame and has programmed a
+     * fresh bank0_base address for it -- which is exactly the point at which
+     * re-enabling is actually safe. Doing it here instead would race ahead of
+     * that and re-arm the writer against whatever stale address was left over
+     * from the frame that just errored. */
 
     LOG( LOG_CRIT, "starting isp from error" );
 }
@@ -292,6 +429,41 @@ int32_t acamera_init_context_seq( acamera_context_t *p_ctx )
     LOG(LOG_ERR, "load isp context sequence[%d]\n", param->isp_context_seq.seq_num);
 
     acamera_load_sw_sequence( p_ctx->settings.isp_base, p_ctx->isp_context_seq.sequence, p_ctx->isp_context_seq.seq_num );
+
+    /*
+     * Re-disarm the output DMA writers that the context sequence just armed.
+     *
+     * settings_context[] ends with a canned FR writer configuration lifted from
+     * whatever bench the vendor captured it on: bank0_base 0x05000000,
+     * line_offset 0x1e00, wbank_active 1 and frame_write_on 1. Those are a real
+     * physical address and a real enable, and this context space is DMA'd
+     * straight into ping and pong a few lines later in acamera_init_context().
+     *
+     * The dma_writer FSM is initialised inside acamera_fw_init(), which runs
+     * *before* this function, and its init clears frame_write_on (dma_writer.c
+     * dma_writer_init_frame_queue path). So loading the sequence undoes that and
+     * leaves a writer enabled against 0x05000000 -- ordinary kernel memory on
+     * this board -- from here until dma_writer_pipe_update() reprograms it at
+     * STREAMON. The input port is set to SAFE_START at the end of
+     * acamera_init_context() and the MIPI adapter has already been started by
+     * the sensor's set_mode, so that window is not theoretical.
+     *
+     * This project has already lost a day to exactly this failure mode once
+     * (a bad DMA address from virt_to_phys() on a coherent allocation, which
+     * SIGSEGV'd PID 1 and corrupted the filesystem), so the writers stay off
+     * until the FSM that owns them turns them on with an address it allocated.
+     */
+    acamera_isp_fr_dma_writer_frame_write_on_write( p_ctx->settings.isp_base, 0 );
+    acamera_isp_fr_uv_dma_writer_frame_write_on_write( p_ctx->settings.isp_base, 0 );
+    acamera_isp_fr_dma_writer_bank0_base_write( p_ctx->settings.isp_base, 0 );
+    acamera_isp_fr_uv_dma_writer_bank0_base_write( p_ctx->settings.isp_base, 0 );
+#if ISP_HAS_DS1
+    acamera_isp_ds1_dma_writer_frame_write_on_write( p_ctx->settings.isp_base, 0 );
+    acamera_isp_ds1_uv_dma_writer_frame_write_on_write( p_ctx->settings.isp_base, 0 );
+    acamera_isp_ds1_dma_writer_bank0_base_write( p_ctx->settings.isp_base, 0 );
+    acamera_isp_ds1_uv_dma_writer_bank0_base_write( p_ctx->settings.isp_base, 0 );
+#endif
+
     return result;
 }
 

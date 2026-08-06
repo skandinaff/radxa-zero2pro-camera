@@ -216,39 +216,131 @@
 					imx415_ep: endpoint {
 						remote-endpoint = <&isp_ep>;
 						/*
-						 * 2 lanes @ 720 MHz link freq
-						 * (= 1440 Mbps/lane).
+						 * 4 lanes @ 720 MHz link freq (= 1440
+						 * Mbps per lane), giving 3864x2192 at
+						 * 60.038 fps.
 						 *
-						 * imx415.c only accepts an
-						 * (inck, lane_rate, lanes)
-						 * triple that exists in BOTH
-						 * imx415_clk_params[] and
-						 * supported_modes[]:
+						 * link-frequencies is the DDR *clock*,
+						 * i.e. half the lane rate: 1440/2 = 720
+						 * MHz. It is unchanged from the 2-lane
+						 * configuration - the per-lane rate is
+						 * identical, there are simply twice as
+						 * many lanes.
+						 *
+						 * WHY 4 LANES IS REACHABLE
+						 * ------------------------
+						 * An earlier version of this comment
+						 * claimed 4-lane was out of reach,
+						 * because imx415.c's only 4-lane mode
+						 * (891 Mbps) needs a 27 MHz INCK while
+						 * this board's MCLK is 24 MHz. That
+						 * conflated two independent things.
+						 *
+						 * imx415_parse_hw_config() validates the
+						 * DT in two separate steps:
+						 *
+						 *  a) imx415_check_inck() looks up
+						 *     imx415_clk_params[] by
+						 *     (lane_rate, inck). Lane count is
+						 *     NOT part of that key - the
+						 *     PLL/INCK block does not care how
+						 *     many lanes the serialiser drives.
+						 *  b) supported_modes[] is then matched
+						 *     on (lanes, lane_rate) to pick the
+						 *     mode register list.
+						 *
+						 * So a 4-lane mode at an already-
+						 * supported lane rate needs no new INCK
+						 * settings at all, only a register list.
+						 * The 1440 Mbps @ 24 MHz entry in
+						 * imx415_clk_params[] is already present
+						 * and is proven working on this board at
+						 * 2 lanes. imx415_mode_4_1440[], added
+						 * by this port (see imx415/imx415.c),
+						 * supplies the register list. Reachable
+						 * triples are now:
 						 *
 						 *   lane_rate  inck   lanes
 						 *    720 MHz   24MHz    2
 						 *   1440 MHz   24MHz    2
-						 *    891 MHz   27MHz    4
+						 *    891 MHz   27MHz    4  (unreachable)
+						 *   1440 MHz   24MHz    4  <- selected
 						 *
-						 * gen_clk gives a 24 MHz INCK
-						 * (xtal, divider 1), so the
-						 * only 4-lane mode is out of
-						 * reach without reparenting
-						 * gen_clk to an MPLL and
-						 * setting it to 27 MHz. The
-						 * connector does wire all four
-						 * lanes (D0..D3), so 4-lane is
-						 * a real future improvement -
-						 * it's also the higher total
-						 * bandwidth (3564 vs 2880
-						 * Mbps). Driving only D0/D1 is
-						 * electrically fine meanwhile.
+						 * The 891/27 MHz row remains out of
+						 * reach and remains irrelevant: it was
+						 * never the only way to get four lanes.
 						 *
-						 * link-frequencies is the DDR
-						 * *clock*, i.e. half the lane
-						 * rate: 1440/2 = 720 MHz.
+						 * The connector wires all four data
+						 * lanes D0..D3 straight to the A311D's
+						 * CSI PHY (see the header comment), so
+						 * this is a pure software change at both
+						 * ends. Total sensor output bandwidth
+						 * goes 2880 -> 5760 Mbps.
+						 *
+						 * !! COUNTERPART REQUIRED IN isp-module !!
+						 * The CSI-2 receiver is not configured
+						 * from this endpoint.
+						 * isp-module/src/driver/sensor/V4L2_drv.c
+						 * hardcodes
+						 *     #define IMX415_LANES 2
+						 * and passes it to am_mipi_init(). It
+						 * must become 4 in lockstep with this
+						 * property, or the PHY will listen on
+						 * two lanes while the sensor transmits
+						 * on four. IMX415_HMAX (4510) is
+						 * unchanged; IMX415_FPS_Q8 becomes
+						 * ( 60 * 256 ).
+						 *
+						 * The 2-lane hold that used to be
+						 * documented here has been lifted: the
+						 * mid-frame stall was the ISP context
+						 * sequence never being loaded, not a MIPI
+						 * problem, and 2-lane capture is now stable
+						 * at 30 fps. Four lanes is the reason this
+						 * mode exists for shot-vision:
+						 *
+						 * ROLLING-SHUTTER SKEW
+						 * --------------------
+						 * Skew is (active rows) * (line period),
+						 * and the line period is HMAX / 72 MHz.
+						 * It is NOT the frame period, and adding
+						 * vertical blanking does not change it.
+						 *
+						 *   2 lanes: HMAX 1066 -> 14.806 us
+						 *            2192 * 14.806 us = 32.45 ms
+						 *   4 lanes: HMAX  533 ->  7.403 us
+						 *            2192 *  7.403 us = 16.23 ms
+						 *
+						 * Halving the line period halves the skew,
+						 * which is the whole point: the sensor is
+						 * reading continuously (58 blank rows in
+						 * 2250, 2.6 %), so there is no idle time to
+						 * reclaim and HMAX is the only lever.
+						 *
+						 * 16.23 ms is the floor for a full-height
+						 * readout on this board. HMAX cannot go
+						 * below 483 (3864 px * 10 bit / 5760 Mbps =
+						 * 6.708 us of payload), and 24 MHz INCK
+						 * caps the lane rate at 1440 Mbps, so the
+						 * remaining 9 % is not worth the loss of
+						 * link margin. Going meaningfully below
+						 * 16 ms requires reading fewer ROWS -
+						 * 2x2 binning or a vertical window - not a
+						 * faster link.
+						 *
+						 * DECOUPLING FRAME RATE FROM SKEW
+						 * -------------------------------
+						 * HMAX sets the skew; VMAX sets the frame
+						 * rate. V4L2_CID_VBLANK is writable (see
+						 * imx415.c) and programs VMAX at runtime,
+						 * so if the ISP cannot sustain 60 fps,
+						 * raising VBLANK drops the frame rate while
+						 * leaving the 16.23 ms readout untouched.
+						 * That is still strictly better than the
+						 * 2-lane 30 fps path it replaces: same
+						 * frame rate, half the skew.
 						 */
-						data-lanes = <1 2>;
+						data-lanes = <1 2 3 4>;
 						link-frequencies = /bits/ 64 <720000000>;
 					};
 				};

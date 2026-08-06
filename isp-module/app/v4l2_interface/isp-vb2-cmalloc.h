@@ -26,6 +26,13 @@ struct vb2_cmalloc_buf {
 	 * dma_alloc_from_contiguous()-based approach (that API isn't
 	 * reachable from an out-of-tree module, confirmed at modpost time). */
 	dma_addr_t			dma_handle;
+	/* The device the coherent allocation belongs to. dma_free_coherent()
+	 * and dma_mmap_coherent() both need it. It used to be smuggled through
+	 * the `dbuf` pointer below by storing a struct device * in it, which
+	 * only worked because nothing ever put a real struct dma_buf * there.
+	 * Given as its own correctly typed field so mmap can use it without
+	 * repeating that trick. */
+	struct device			*dev;
 	struct frame_vector		*vec;
 	enum dma_data_direction		dma_dir;
 	unsigned long			size;

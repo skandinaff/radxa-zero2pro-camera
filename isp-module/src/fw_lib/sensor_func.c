@@ -32,6 +32,21 @@
 #include "sbuf.h"
 #endif
 
+#include <linux/moduleparam.h>
+
+/*
+ * Diagnostic knob, default off. See the long comment in
+ * sensor_configure_buffers() -- in short, the temper DMA channel enables all
+ * reset to 1 while their bank base addresses reset to 0, and the driver's
+ * "temper is disabled" path only ever clears the two LSB ones. Setting this to
+ * 1 clears the MSB pair as well. Measured to make the stall worse (hard hang
+ * rather than a polite stall), so it stays off until temper has real buffers.
+ */
+static int isp_temper_disable_msb_dma = 0;
+module_param( isp_temper_disable_msb_dma, int, 0644 );
+MODULE_PARM_DESC( isp_temper_disable_msb_dma,
+                  "Diagnostic: 1 = also clear the temper MSB DMA enables when temper is disabled" );
+
 typedef struct {
     uint16_t active_width;
     uint16_t active_height;
@@ -139,6 +154,13 @@ void sensor_configure_buffers( sensor_fsm_ptr_t p_fsm )
             acamera_isp_temper_dma_lsb_bank_base_reader_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, temper_frames[0].address );
             acamera_isp_temper_dma_lsb_bank_base_writer_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, temper_frames[0].address );
             acamera_isp_temper_temper2_mode_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 1 ); //temper 2
+            /* temper2 uses only the LSB banks, so the MSB channels are left
+             * armed at their reset default over an unprogrammed base address.
+             * Same asymmetry as the else branch below; same knob. */
+            if ( isp_temper_disable_msb_dma ) {
+                acamera_isp_temper_dma_frame_write_on_msb_dma_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 0 );
+                acamera_isp_temper_dma_frame_read_on_msb_dma_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 0 );
+            }
         } else {
             // temper3 has lsb and msb parts
             acamera_isp_temper_dma_lsb_bank_base_reader_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, temper_frames[0].address );
@@ -148,15 +170,83 @@ void sensor_configure_buffers( sensor_fsm_ptr_t p_fsm )
             acamera_isp_temper_temper2_mode_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 0 ); //temper 3
         }
         acamera_isp_temper_dma_line_offset_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, acamera_isp_top_active_width_read( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base ) * 3 );
+        /* Buffers are valid, so put temper back in the datapath. Mirrors what
+         * temper_mode() in acamera_command_api_impl.c does on the same test. */
+        acamera_isp_top_bypass_temper_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 0 );
         acamera_isp_temper_enable_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 1 );
         acamera_isp_temper_dma_frame_write_on_lsb_dma_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 1 );
         acamera_isp_temper_dma_frame_read_on_lsb_dma_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 1 );
 
     } else {
+        /*
+         * "Temper is disabled" was only ever half true, and the missing half
+         * is a plausible cause of the pipeline stall this board has been stuck
+         * on. There are four temper DMA channel enables -- write/read x
+         * lsb/msb -- and every one of them resets to 1:
+         *
+         *   ACAMERA_ISP_TEMPER_DMA_FRAME_WRITE_ON_LSB_DMA_DEFAULT (1)
+         *   ACAMERA_ISP_TEMPER_DMA_FRAME_READ_ON_LSB_DMA_DEFAULT  (1)
+         *   ACAMERA_ISP_TEMPER_DMA_FRAME_WRITE_ON_MSB_DMA_DEFAULT (1)
+         *   ACAMERA_ISP_TEMPER_DMA_FRAME_READ_ON_MSB_DMA_DEFAULT  (1)
+         *
+         * while every temper bank base address resets to 0x0. This branch
+         * cleared the two LSB enables and left the two MSB ones alone, and
+         * nothing else in the driver writes them -- so an ISP that reports
+         * temper as disabled still has a temper DMA reader and writer armed
+         * against physical address 0. ISP_HAS_TEMPER is 3 here, i.e. temper3,
+         * which is exactly the mode that uses the MSB banks.
+         *
+         * Symptom that led here: the ISP accepts one frame start and then
+         * never completes the frame -- fr_pipeline_busy latches at 1 forever
+         * and every subsequent sensor vsync arrives as a FRAME_COLLISION, at
+         * exactly the 33.3ms frame period, indefinitely. Meanwhile everything
+         * upstream measures healthy (the CSI-2 adapter frontend receives
+         * full-width 3864-pixel lines continuously) and the output side is
+         * quiet (no write-FIFO overflow, dma_alarms clear). A pipeline stage
+         * whose DMA never retires fits that shape, where a bandwidth or
+         * geometry problem does not.
+         *
+         * MEASURED RESULT, and why this is behind a knob rather than just done:
+         * turning the two MSB channels off makes things *worse*, not better --
+         * the board hangs hard during capture (no SSH, deadman reboot) instead
+         * of stalling politely. So those channels are load-bearing in the
+         * temper3 datapath, not merely idle-but-armed, and the real fix is
+         * almost certainly to give temper the DDR buffers it wants (2 x
+         * width*height*4 = ~33.9MB each at 3864x2192) or to put the block into
+         * a genuine bypass, rather than to yank its DMA out from under it.
+         *
+         * Left in, default off, because the asymmetry above is a real defect
+         * worth keeping visible and the knob makes it one insmod arg to
+         * re-test once temper buffers exist.
+         */
+        /*
+         * The genuine bypass the comment above asks for, now that it is needed.
+         *
+         * top_bypass_temper takes the block out of the pipeline entirely, as
+         * opposed to temper_enable which only stops it doing temporal work while
+         * it stays in the datapath. It resets to 1 (bypassed), which is why
+         * nothing here used to have to set it -- but the ISP context sequence
+         * this driver now loads (see V4L2_drv.c isp_context_seq) clears it,
+         * because the vendor board it was captured on had temper buffers carved
+         * out at a fixed physical address. This one does not, so put the bypass
+         * back. Order is safe: acamera_init_context_seq() runs once during
+         * acamera_init_context(), and sensor_fsm re-runs sensor_configure_buffers()
+         * on every mode/preset change after that, which is what precedes STREAMON.
+         *
+         * This also makes the isp_temper_disable_msb_dma experiment below moot
+         * for the disabled case: with the block bypassed its DMA channels are no
+         * longer part of the datapath at all.
+         */
+        acamera_isp_top_bypass_temper_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 1 );
         acamera_isp_temper_enable_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 0 );
         acamera_isp_temper_dma_frame_write_on_lsb_dma_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 0 );
         acamera_isp_temper_dma_frame_read_on_lsb_dma_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 0 );
-        LOG( LOG_ERR, "No output buffers for temper block provided in settings. Temper is disabled" );
+        if ( isp_temper_disable_msb_dma ) {
+            acamera_isp_temper_dma_frame_write_on_msb_dma_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 0 );
+            acamera_isp_temper_dma_frame_read_on_msb_dma_write( ACAMERA_FSM2CTX_PTR( p_fsm )->settings.isp_base, 0 );
+        }
+        LOG( LOG_ERR, "No output buffers for temper block provided in settings. Temper is disabled (msb dma off: %d)",
+             isp_temper_disable_msb_dma );
     }
 #endif
 }

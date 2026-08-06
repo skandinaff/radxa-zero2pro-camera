@@ -119,6 +119,8 @@ FW_SRC_OBJ := app/main_kernel_juno_v4l2.o \
 			  src/calibration/acamera_get_calibrations_v4l2.o \
 			  src/calibration/acamera_calibrations_static_linear_dummy.o \
 			  src/calibration/acamera_calibrations_dynamic_linear_dummy.o \
+			  src/calibration/acamera_calibrations_static_linear_imx415.o \
+			  src/calibration/acamera_calibrations_dynamic_linear_imx415.o \
 			  src/driver/sensor/sensor_bus_config.o \
 			  src/driver/sensor/V4L2_drv.o \
 			  src/driver/sensor/ACameraDefault.o \

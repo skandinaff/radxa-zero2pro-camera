@@ -23,8 +23,8 @@
 #include "acamera_sensor_api.h"
 
 /*
- * radxa-zero2pro-camera: calibrations come from the built-in "dummy" tables,
- * not from the vendor's separate soc_iq subdev module.
+ * radxa-zero2pro-camera: calibrations are built into this module, not fetched
+ * from the vendor's separate soc_iq subdev module.
  *
  * The vendor stack keeps IQ data in its own kernel module (subdev/iq ->
  * iv009_isp_iq.ko), which this port does not build: it exists only to publish
@@ -41,18 +41,71 @@
  * makes the module unloadable. Every one of the CALIBRATION_TOTAL_SIZE (123)
  * entries an enabled FSM touches has to be non-NULL.
  *
- * The dummy set is ARM's neutral reference tuning, carried over verbatim from
- * the vendor tree. It is enough to bring the pipeline up and get frames out;
- * it is NOT tuned for the IMX415, so colour, black level, lens shading and
- * noise reduction will all be visibly wrong. Correct output needs a real
- * IMX415 calibration set. See README "Image quality".
- *
  * Only the LINEAR mode is wired up: the overlay selects a non-WDR IMX415 mode,
- * and the vendor's dummy tree has no linear-WDR/native tables to point at.
+ * and neither calibration set has linear-WDR/native tables to point at.
+ *
+ *
+ * ---------------------------------------------------------------------------
+ * WHICH SET, AND HOW TO ROLL BACK
+ * ---------------------------------------------------------------------------
+ *
+ * Two complete sets exist. Both are always compiled; this file picks one.
+ *
+ *   ACAMERA_CALIBRATION_IMX415 = 1  (default)
+ *       acamera_calibrations_{static,dynamic}_linear_imx415.c
+ *       Tuned for this camera and for the shot-trainer CV pipeline: linear
+ *       gamma, datasheet black level, identity CCM, sharpening and temporal
+ *       denoise off, Iridix off. Several tables are still placeholders pending
+ *       hardware measurement -- lens shading above all. Every table names its
+ *       source in a comment; docs/calibration-imx415.md has the inventory and
+ *       the measurement procedures.
+ *
+ *   ACAMERA_CALIBRATION_IMX415 = 0
+ *       acamera_calibrations_{static,dynamic}_linear_dummy.c
+ *       ARM's neutral reference tuning, carried over verbatim from the vendor
+ *       tree. Not tuned for the IMX415 at all -- colour, black level, lens
+ *       shading and noise reduction will all be wrong -- but it is the
+ *       known-good configuration this port was brought up on. Roll back to it
+ *       by flipping the #define below (one line, nothing else to change: the
+ *       dummy .c files are untouched and still in the Makefile).
+ *
+ * Which set actually loaded is logged at LOG_CRIT on every call, so a boot log
+ * settles the question rather than a code read.
+ *
+ * ---------------------------------------------------------------------------
+ * BUILD REQUIREMENT -- READ THIS IF THE LINK FAILS
+ * ---------------------------------------------------------------------------
+ *
+ * The two imx415 .c files must be listed in isp-module/Makefile alongside the
+ * dummy ones. Add these two lines next to the existing
+ * src/calibration/acamera_calibrations_*_dummy.o entries:
+ *
+ *     src/calibration/acamera_calibrations_static_linear_imx415.o \
+ *     src/calibration/acamera_calibrations_dynamic_linear_imx415.o \
+ *
+ * Without them the link fails with an undefined reference to
+ * get_calibrations_static_linear_imx415. (Setting ACAMERA_CALIBRATION_IMX415 to
+ * 0 also makes the build succeed, at the cost of running the untuned set.)
  */
+
+#ifndef ACAMERA_CALIBRATION_IMX415
+#define ACAMERA_CALIBRATION_IMX415 1
+#endif
 
 extern uint32_t get_calibrations_static_linear_dummy( ACameraCalibrations *c );
 extern uint32_t get_calibrations_dynamic_linear_dummy( ACameraCalibrations *c );
+
+#if ACAMERA_CALIBRATION_IMX415
+extern uint32_t get_calibrations_static_linear_imx415( ACameraCalibrations *c );
+extern uint32_t get_calibrations_dynamic_linear_imx415( ACameraCalibrations *c );
+#define CALIBRATION_SET_NAME "imx415"
+#define get_calibrations_static_linear get_calibrations_static_linear_imx415
+#define get_calibrations_dynamic_linear get_calibrations_dynamic_linear_imx415
+#else
+#define CALIBRATION_SET_NAME "dummy"
+#define get_calibrations_static_linear get_calibrations_static_linear_dummy
+#define get_calibrations_dynamic_linear get_calibrations_dynamic_linear_dummy
+#endif
 
 uint32_t get_calibrations_v4l2( uint32_t ctx_id, void *sensor_arg, ACameraCalibrations *c )
 {
@@ -67,7 +120,7 @@ uint32_t get_calibrations_v4l2( uint32_t ctx_id, void *sensor_arg, ACameraCalibr
      * sensor_arg is NULL when the firmware asks for calibrations before the
      * sensor FSM has a mode to report -- which it does during init, and always
      * will if the sensor bridge failed to attach. Linear is the right default:
-     * it is the mode the overlay selects, and the only one the dummy tree has
+     * it is the mode the overlay selects, and the only one either tree has
      * tables for. */
     if ( sensor_arg )
         preset = ( (sensor_mode_t *)sensor_arg )->wdr_mode;
@@ -75,12 +128,12 @@ uint32_t get_calibrations_v4l2( uint32_t ctx_id, void *sensor_arg, ACameraCalibr
         LOG( LOG_CRIT, "calibration sensor_arg is NULL, assuming linear" );
 
     if ( preset != WDR_MODE_LINEAR )
-        LOG( LOG_CRIT, "No dummy calibration for wdr_mode %d, using linear", (int)preset );
+        LOG( LOG_CRIT, "No " CALIBRATION_SET_NAME " calibration for wdr_mode %d, using linear", (int)preset );
 
-    ret = get_calibrations_dynamic_linear_dummy( c ) +
-          get_calibrations_static_linear_dummy( c );
+    ret = get_calibrations_dynamic_linear( c ) +
+          get_calibrations_static_linear( c );
 
-    LOG( LOG_CRIT, "Loaded dummy calibrations, ctx_id:%d wdr_mode:%d ret:%d",
+    LOG( LOG_CRIT, "Loaded " CALIBRATION_SET_NAME " calibrations, ctx_id:%d wdr_mode:%d ret:%d",
          ctx_id, (int)preset, ret );
 
     return ret;

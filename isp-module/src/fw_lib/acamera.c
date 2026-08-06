@@ -32,6 +32,43 @@
 #include "acamera_decompander0_mem_config.h"
 #include "acamera_ihist_stats_mem_config.h"
 
+#include <linux/moduleparam.h>
+
+/*
+ * Diagnostic knob, default off: keep streaming through FRAME_COLLISION
+ * instead of treating it as fatal.
+ *
+ * Measured behaviour on this board (2026-08-05): the ISP raises exactly one
+ * FRAME_COLLISION, ~30ms (one frame period) after the first real frame start,
+ * and the error routine then shuts the pipeline down for good -- so every
+ * capture dies on frame 1 and we have never once observed what frames 2..N
+ * would have done. Everything upstream measures healthy at that moment: the
+ * CSI-2 adapter frontend is receiving full-width 3864-pixel lines and cycling
+ * its line counter frame after frame for as long as the sensor streams
+ * (CSI2_PIC_SIZE_STAT), the write FIFOs report no overflow, dma_alarms is
+ * clear, broken_frame is clear, and the ISP core clock is 666MHz against a
+ * ~254Mpix/s requirement.
+ *
+ * A collision on the very first frame is also exactly what a sensor that has
+ * not finished settling produces, and the vendor design treats the condition
+ * as recoverable rather than terminal. So the open question is whether this is
+ * a genuine persistent stall or a one-off startup transient that we escalate
+ * into a permanent failure.
+ *
+ * Setting this to 1 answers that: acknowledge the interrupt, leave the
+ * pipeline alone, and let the ISP continue. If frames start arriving, the
+ * collision was transient. If it stalls anyway, the stall is real and the
+ * error routine was never the thing standing in the way.
+ *
+ * Safe to try only because frames now land at addresses obtained from
+ * vb2_plane_cookie() rather than virt_to_phys(); under the old address bug,
+ * letting a collided pipeline keep writing is precisely what corrupted memory.
+ */
+static int isp_ignore_frame_collision = 0;
+module_param( isp_ignore_frame_collision, int, 0644 );
+MODULE_PARM_DESC( isp_ignore_frame_collision,
+                  "Diagnostic: 1 = log FRAME_COLLISION and keep streaming instead of stopping the ISP" );
+
 
 #if FW_HAS_CONTROL_CHANNEL
 #include "acamera_ctrl_channel.h"
@@ -554,10 +591,35 @@ int32_t acamera_interrupt_handler()
              ( irq_mask & 1 << ISP_INTERRUPT_EVENT_WATCHDOG_EXP ) ||
              ( irq_mask & 1 << ISP_INTERRUPT_EVENT_FRAME_COLLISION ) ) {
 
-            LOG( LOG_CRIT, "Found error resetting ISP. MASK is 0x%x", irq_mask );
+            /* Diagnostic mode: a collision, and *only* a collision, is
+             * survivable enough to keep going. Any of the other four error
+             * bits still means stop -- a broken frame or a DMA error is a
+             * statement about data integrity, not about timing, and none of
+             * them has ever been observed here anyway. Falling through to the
+             * normal per-bit processing below is deliberate: the FS/FE work
+             * (ping-pong config swap, DMA writer address programming) is what
+             * gives the next frame somewhere to land. */
+            if ( isp_ignore_frame_collision &&
+                 ( irq_mask & ~( 1u << ISP_INTERRUPT_EVENT_FRAME_COLLISION ) ) == 0 ) {
+                static uint32_t collision_count = 0;
+                collision_count++;
+                /* Log the first few and then every 30th (~1s at 30fps), so a
+                 * persistent stall is visible without a per-frame log flood. */
+                if ( collision_count <= 5 || ( collision_count % 30 ) == 0 ) {
+                    LOG( LOG_CRIT, "FRAME_COLLISION #%u ignored (isp_ignore_frame_collision=1): "
+                                   "fr_pipeline_busy %u broken_frame %u dma_alarms 0x%x",
+                         (unsigned int)collision_count,
+                         (unsigned int)acamera_isp_isp_global_monitor_fr_pipeline_busy_read( p_ctx->settings.isp_base ),
+                         (unsigned int)acamera_isp_isp_global_monitor_broken_frame_status_read( p_ctx->settings.isp_base ),
+                         (unsigned int)acamera_isp_isp_global_monitor_dma_alarms_read( p_ctx->settings.isp_base ) );
+                }
+                irq_mask &= ~( 1u << ISP_INTERRUPT_EVENT_FRAME_COLLISION );
+            } else {
+                LOG( LOG_CRIT, "Found error resetting ISP. MASK is 0x%x", irq_mask );
 
-            acamera_fw_error_routine( p_ctx, irq_mask );
-            return -1; //skip other interrupts in case of error
+                acamera_fw_error_routine( p_ctx, irq_mask );
+                return -1; //skip other interrupts in case of error
+            }
         }
 #endif
 
