@@ -296,20 +296,44 @@ static uint32_t _calibration_evtolux_lux_lut[] = {20000, 18000, 16000, 14000, 12
  * 1/30 s, Tj = 60 C), i.e. under half an LSB here, so dark current does not move
  * it either.
  *
- * STILL WORTH CONFIRMING ON HARDWARE: one capped-lens capture. The procedure is
- * in docs/calibration-imx415.md ("Black level"). If the measured floor is not
- * ~200/4096 of full scale, the MSB-alignment assumption above is what is wrong.
+ * MEASURED ON HARDWARE 2026-08-06, capped lens, docs/calibration-imx415.md 5.1
+ * two-build subtraction (black level 0 vs 100, WB neutralised to 256 x4,
+ * analog gain 0, 1120 lines, 72 frames each, mean of Y over a central 512x512):
+ *
+ *   ISP dgain      Y(blk=0)   Y(blk=100)     k DN/unit    ped_true
+ *   1.00x           11.0001       5.0000       0.06000      183.33   <- discarded
+ *   4.00x           47.3928      23.9542       0.23439      202.20
+ *   8.00x           95.9137      48.3160       0.47598      201.51
+ *   11.31x         135.3310      68.5691       0.66762      202.71
+ *
+ *   ped_true = 202.1 +/- 0.6
+ *
+ * The unity-gain row is discarded: capped and at minimum gain the sensor noise
+ * is far below one output DN, so both means come back as exact integers and
+ * each carries +/-0.5 DN of quantisation error. Raising the ISP's *digital*
+ * gain fixes that -- it sits after the black-level subtraction, so it scales
+ * Y0 and the difference equally and cancels out of
+ * ped_true = 100*Y0/(Y0-Y100), while dithering the 8-bit output. That the three
+ * dithered rows agree to 0.6 % is also what rules out a post-subtraction
+ * additive offset, which would have made ped_true drift with gain.
+ *
+ * So 202, against the 200 predicted above: the datasheet derivation and the
+ * MSB-alignment assumption are confirmed to within 1 %. The residual +2.1 units
+ * (0.13 DN at unity gain) is real dark offset, not stray light -- a leak check
+ * at 25x analog gain bounds any leak at 0.0096 DN referred to unity gain, a
+ * sixth of one unit here. Flat-across-gain holds too: the residual stays at the
+ * floor from 1x to 25x analog gain.
  */
 static uint16_t _calibration_black_level_r[][2] = {
-    {0, 200},
-    {32, 200},
-    {64, 200},
-    {96, 200},
-    {128, 200},
-    {160, 200},
-    {192, 200},
-    {224, 200},
-    {256, 200}};
+    {0, 202},
+    {32, 202},
+    {64, 202},
+    {96, 202},
+    {128, 202},
+    {160, 202},
+    {192, 202},
+    {224, 202},
+    {256, 202}};
 
 // CALIBRATION_BLACK_LEVEL_GR
 /* SOURCE: IMX415-AAQR-C datasheet (E19504), "Black Level Adjustment Function".
@@ -334,20 +358,21 @@ static uint16_t _calibration_black_level_r[][2] = {
  * 1/30 s, Tj = 60 C), i.e. under half an LSB here, so dark current does not move
  * it either.
  *
- * STILL WORTH CONFIRMING ON HARDWARE: one capped-lens capture. The procedure is
- * in docs/calibration-imx415.md ("Black level"). If the measured floor is not
- * ~200/4096 of full scale, the MSB-alignment assumption above is what is wrong.
+ * MEASURED ON HARDWARE 2026-08-06 as 202 (docs/calibration-imx415.md 5.1); see
+ * the full working in the CALIBRATION_BLACK_LEVEL_R comment above. BLKLEVEL is
+ * common to all four channels and the measurement found no per-channel
+ * difference resolvable above 1 unit, so all four tables carry the same value.
  */
 static uint16_t _calibration_black_level_gr[][2] = {
-    {0, 200},
-    {32, 200},
-    {64, 200},
-    {96, 200},
-    {128, 200},
-    {160, 200},
-    {192, 200},
-    {224, 200},
-    {256, 200}};
+    {0, 202},
+    {32, 202},
+    {64, 202},
+    {96, 202},
+    {128, 202},
+    {160, 202},
+    {192, 202},
+    {224, 202},
+    {256, 202}};
 
 // CALIBRATION_BLACK_LEVEL_GB
 /* SOURCE: IMX415-AAQR-C datasheet (E19504), "Black Level Adjustment Function".
@@ -372,20 +397,21 @@ static uint16_t _calibration_black_level_gr[][2] = {
  * 1/30 s, Tj = 60 C), i.e. under half an LSB here, so dark current does not move
  * it either.
  *
- * STILL WORTH CONFIRMING ON HARDWARE: one capped-lens capture. The procedure is
- * in docs/calibration-imx415.md ("Black level"). If the measured floor is not
- * ~200/4096 of full scale, the MSB-alignment assumption above is what is wrong.
+ * MEASURED ON HARDWARE 2026-08-06 as 202 (docs/calibration-imx415.md 5.1); see
+ * the full working in the CALIBRATION_BLACK_LEVEL_R comment above. BLKLEVEL is
+ * common to all four channels and the measurement found no per-channel
+ * difference resolvable above 1 unit, so all four tables carry the same value.
  */
 static uint16_t _calibration_black_level_gb[][2] = {
-    {0, 200},
-    {32, 200},
-    {64, 200},
-    {96, 200},
-    {128, 200},
-    {160, 200},
-    {192, 200},
-    {224, 200},
-    {256, 200}};
+    {0, 202},
+    {32, 202},
+    {64, 202},
+    {96, 202},
+    {128, 202},
+    {160, 202},
+    {192, 202},
+    {224, 202},
+    {256, 202}};
 
 // CALIBRATION_BLACK_LEVEL_B
 /* SOURCE: IMX415-AAQR-C datasheet (E19504), "Black Level Adjustment Function".
@@ -410,20 +436,21 @@ static uint16_t _calibration_black_level_gb[][2] = {
  * 1/30 s, Tj = 60 C), i.e. under half an LSB here, so dark current does not move
  * it either.
  *
- * STILL WORTH CONFIRMING ON HARDWARE: one capped-lens capture. The procedure is
- * in docs/calibration-imx415.md ("Black level"). If the measured floor is not
- * ~200/4096 of full scale, the MSB-alignment assumption above is what is wrong.
+ * MEASURED ON HARDWARE 2026-08-06 as 202 (docs/calibration-imx415.md 5.1); see
+ * the full working in the CALIBRATION_BLACK_LEVEL_R comment above. BLKLEVEL is
+ * common to all four channels and the measurement found no per-channel
+ * difference resolvable above 1 unit, so all four tables carry the same value.
  */
 static uint16_t _calibration_black_level_b[][2] = {
-    {0, 200},
-    {32, 200},
-    {64, 200},
-    {96, 200},
-    {128, 200},
-    {160, 200},
-    {192, 200},
-    {224, 200},
-    {256, 200}};
+    {0, 202},
+    {32, 202},
+    {64, 202},
+    {96, 202},
+    {128, 202},
+    {160, 202},
+    {192, 202},
+    {224, 202},
+    {256, 202}};
 
 // CALIBRATION_STATIC_WB
 /* SOURCE: IMX415-AAQR-C datasheet (E19504), "Image Sensor Characteristics".

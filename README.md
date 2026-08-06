@@ -250,12 +250,16 @@ not survive a reboot, by design.
   and publishes statistics correctly; nothing consumes them. Exposure and gain
   are manual-only, which is what the CV application wants anyway, but it does
   mean the image will not adapt to a change in scene brightness.
-- **No IQ calibration yet.** The IMX415 calibration set in
+- **IQ calibration is partly measured.** The IMX415 calibration set in
   `src/calibration/acamera_calibrations_*_linear_imx415.c` builds and loads
-  (`Loaded imx415 calibrations` at `LOG_CRIT` on every boot), and linearity now
-  measures clean, but the two measurements that need physical fixtures — black
-  level (§5.1, needs a lens cap) and lens shading (§5.2, needs a flat-field
-  target) — have not been made. See `docs/calibration-imx415.md`.
+  (`Loaded imx415 calibrations` at `LOG_CRIT` on every boot). Linearity (§5.6)
+  and temporal stability (§5.6) pass, and **black level (§5.1) is now measured
+  on hardware: `ped_true` = 202.1 ± 0.6**, against the 200 derived from the
+  datasheet in §4.1 — agreement to within 1 %, confirming the input formatter
+  MSB-aligns the sensor's 10 bits and that every 12-bit-domain assumption in
+  `docs/calibration-imx415.md` holds. All four black-level tables now carry 202.
+  **Lens shading (§5.2) still needs a flat-field target** and has not been
+  made.
 - **The last 96 bytes of each line's stride padding are never written.** The FR
   DMA writer emits 121 aligned 32-byte bursts per line = 3872 bytes, so columns
   3864–3871 are zero-filled by the final burst and columns 3872–3967 keep

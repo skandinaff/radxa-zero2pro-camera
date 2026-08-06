@@ -297,8 +297,10 @@ digital gain modulation was performed"), so it is a constant in output DN, and
 dark signal is specified at ≤ 0.89 digit (12-bit, 1/30 s, Tj = 60 °C) — under
 half an LSB — so dark current does not move it either.
 
-Still worth one confirming capture; the procedure is §5.1. If it disagrees, the
-MSB-alignment assumption is what is wrong.
+**Confirmed on hardware 2026-08-06:** the capped-lens two-build measurement in
+§5.1 returns 202.1 ± 0.6 against the 200 derived here — agreement to within 1 %,
+so MSB-alignment holds and the 12-bit domain is the right one. The tables now
+carry 202; the extra 2 units are measured dark offset.
 
 ### 4.2 Gamma — neutral-CV, exact linear
 
@@ -531,6 +533,59 @@ active area only.
    up at 0…2 with a noise tail, and **must not** be a broad peak at some positive
    value (under-subtraction) or entirely pinned at 0 with no noise
    (over-subtraction, which clips away real signal).
+
+> **DONE 2026-08-06 — `ped_true` = 202.1 ± 0.6, the ≈ 200 regime.** The
+> MSB-alignment derivation in §4.1 is confirmed to within 1 %, so the 12-bit
+> domain assumptions in this document stand. 202 is now written into all four
+> tables.
+>
+> | ISP dgain | Y(blk=0) | Y(blk=100) | k DN/unit | `ped_true` |
+> |---|---|---|---|---|
+> | 1.00× | 11.0001 | 5.0000 | 0.06000 | 183.33 *(discarded)* |
+> | 4.00× | 47.3928 | 23.9542 | 0.23439 | 202.20 |
+> | 8.00× | 95.9137 | 48.3160 | 0.47598 | 201.51 |
+> | 11.31× | 135.3310 | 68.5691 | 0.66762 | 202.71 |
+>
+> **Do the subtraction at raised ISP *digital* gain, not at unity.** Step 4 as
+> written above gives integers: capped and at minimum gain the sensor noise is
+> far below one output DN, so `Y0` and `Y100` come back as exact integers each
+> carrying ±0.5 DN of quantisation error, and `ped_true` lands anywhere in
+> 183 ± 25. ISP digital gain sits *after* the black-level subtraction, so it
+> scales `Y0` and the difference equally and cancels out of
+> `100·Y0/(Y0−Y100)` — while dithering the 8-bit output enough to recover
+> fractional means. The three dithered rows agreeing to 0.6 % is also what rules
+> out a post-subtraction additive offset, which would have made `ped_true` drift
+> with gain.
+>
+> The residual +2.1 units over the datasheet's 200 (0.13 DN at unity gain) is
+> real dark offset, not stray light. Since the room light could not be switched
+> remotely, darkness was verified instead by sweeping *analogue* gain, which
+> amplifies photons but not the ISP's fixed subtraction: means of 0.0014 →
+> 0.2683 → 2.7624 DN at 1× → 8× → 25.4×. A leak is a photon signal and would
+> scale exactly with gain; growth of 192× then 10.3× against gain steps of 8×
+> and 3.2× is instead the signature of a zero-mean noise distribution clipped at
+> 0, whose surviving positive tail grows fastest as σ crosses the quantisation
+> step. That bounds any leak at **0.0096 DN referred to unity gain**, a sixth of
+> one calibration unit. The frame is also flat to 0.25 DN across a 4×4 block map
+> at 285× total gain, with no edge or corner gradient.
+>
+> Step 8 histogram, final build, capped: at unity gain 100 % of pixels sit at 0;
+> at 11.31× ISP digital gain 99.90 % sit at 0 with a tail out to 9 DN. Piled at
+> 0 with a noise tail present — neither a broad positive peak nor a noiseless
+> pin at 0. **PASS.**
+>
+> Per-channel: all four tables carry the same 202. `BLKLEVEL` is common to all
+> channels, and with WB restored to {512, 256, 256, 731} — which amplifies R by
+> 2× and B by 2.9× — the whole-frame residual is 0.0014 DN at 11.31× gain. A
+> per-channel error of even one unit would show as ~0.4 DN there, so any
+> imbalance is well under the 1 DN the procedure allows.
+>
+> Note the pipeline-health rule needs adapting for this measurement: stride
+> autocorrelation needs image structure and a dark frame has none. Each reload
+> was instead validated with the IMX415's own test-pattern generator, which must
+> return a byte-exact uniform frame whose value changes with a sensor register
+> write (patterns 2 and 3 → 246 and 90). Neither a frozen buffer nor unrelated
+> kernel memory can do that.
 
 ### 5.2 Lens shading — flat field ⚠️ **highest-value measurement**
 
