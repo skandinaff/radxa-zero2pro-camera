@@ -58,6 +58,7 @@
 #include "isp_config_seq.h"
 
 #include <linux/delay.h>
+#include <linux/math64.h>
 #include <linux/moduleparam.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-subdev.h>
@@ -115,6 +116,34 @@ extern void *acamera_camera_v4l2_get_subdev_by_prefix( const char *prefix );
 /* imx415 V4L2_CID_ANALOGUE_GAIN is 0..100 in 0.3 dB steps -> 30 dB. */
 #define IMX415_AGAIN_MAX_DB 30
 
+/*
+ * Conversion between the ISP's gain unit -- log2(gain), Q<LOG2_GAIN_SHIFT> --
+ * and decibels.
+ *
+ *   dB = 20*log10(g) = 20*log2(g)/log2(10) = 6.0206 * log2(g)
+ *
+ * The factor is 6.0206, not 20. The original port used 20 in both directions
+ * (`gain * 20 >> LOG2_GAIN_SHIFT` and `(db << LOG2_GAIN_SHIFT) / 20`), i.e. it
+ * applied the log10->dB constant to a log2 quantity. The two errors are exact
+ * inverses, so the round trip looked self-consistent and nothing failed
+ * loudly -- but every gain the ISP asked for was delivered 3.32x too large in
+ * dB, and again_log2_max came out as 1.5 (2.83x) instead of 4.98 (31.6x).
+ *
+ * Measured consequence, 2026-08-06: sweeping sensor_analog_gain_set gave
+ * 0 -> 0.33 DN, 32 -> 5.81, 64 -> 20.5, 96 -> 20.6, 128 -> 20.7. Everything
+ * from 48 up was clamped to the same maximum, so five-sixths of the control's
+ * range did nothing and the part that worked had the wrong slope.
+ *
+ * 60206/10000 keeps 4 decimal places; the intermediate needs 64 bits
+ * (log2 5 in Q18 is 1310720, times 60206 is 7.9e10).
+ */
+#define LOG2_TO_DB_NUM 60206
+#define LOG2_TO_DB_DEN 10000
+#define LOG2_Q_TO_DB( g ) \
+    ( (int32_t)div_s64( ( (int64_t)( g ) * LOG2_TO_DB_NUM ) >> LOG2_GAIN_SHIFT, LOG2_TO_DB_DEN ) )
+#define DB_TO_LOG2_Q( db ) \
+    ( (int32_t)div_s64( ( (int64_t)( db ) << LOG2_GAIN_SHIFT ) * LOG2_TO_DB_DEN, LOG2_TO_DB_NUM ) )
+
 #define V4L2_SENSOR_MAXIMUM_PRESETS_NUM 1
 
 static sensor_mode_t supported_modes[V4L2_SENSOR_MAXIMUM_PRESETS_NUM] = {
@@ -159,6 +188,16 @@ static int isp_ctx_seq = SENSOR_ISP_SEQUENCE_DEFAULT_SETTINGS_CONTEXT_TOP;
 module_param( isp_ctx_seq, int, 0444 );
 MODULE_PARM_DESC( isp_ctx_seq,
                   "ISP context sequence index: 9=top-only (default), 7=full vendor, 0=linear" );
+
+/*
+ * Log, roughly once a second while streaming, what the ISP's AE decided and
+ * what the imx415 subdev's controls actually ended up holding. Writable at
+ * runtime (0644) so it can be turned on mid-capture. See sensor_update().
+ */
+int isp_trace_exposure = 0;
+module_param( isp_trace_exposure, int, 0644 );
+MODULE_PARM_DESC( isp_trace_exposure,
+                  "Diagnostic: 1 = log AE integration time/gain vs the sensor's actual control values" );
 
 
 static struct v4l2_ctrl *sensor_ctrl( sensor_context_t *p_ctx, uint32_t id )
@@ -277,7 +316,7 @@ static void sensor_update_parameters( sensor_context_t *p_ctx )
     }
 
     param->again_accuracy = 1 << LOG2_GAIN_SHIFT;
-    param->again_log2_max = ( IMX415_AGAIN_MAX_DB << LOG2_GAIN_SHIFT ) / 20;
+    param->again_log2_max = DB_TO_LOG2_Q( IMX415_AGAIN_MAX_DB );
     param->dgain_log2_max = 0;
 
     /*
@@ -363,11 +402,11 @@ static int32_t sensor_alloc_analog_gain( void *ctx, int32_t gain )
         gain = 0;
 
     /* log2 gain (Q<LOG2_GAIN_SHIFT>) -> dB -> imx415's 0.3 dB steps. */
-    gain_db = ( gain * 20 ) >> LOG2_GAIN_SHIFT;
+    gain_db = LOG2_Q_TO_DB( gain );
     p_ctx->again_val = ( gain_db * 10 ) / 3;
 
     /* Report back the gain actually representable, in the ISP's units. */
-    return ( ( ( p_ctx->again_val * 3 ) / 10 ) << LOG2_GAIN_SHIFT ) / 20;
+    return DB_TO_LOG2_Q( ( p_ctx->again_val * 3 ) / 10 );
 }
 
 
@@ -405,12 +444,38 @@ static int32_t sensor_ir_cut_set( void *ctx, int32_t ir_cut_state )
 static void sensor_update( void *ctx )
 {
     sensor_context_t *p_ctx = ctx;
+    int rc_exp, rc_gain;
 
     if ( p_ctx == NULL || p_ctx->sensor_sd == NULL )
         return;
 
-    sensor_ctrl_set( p_ctx, V4L2_CID_EXPOSURE, p_ctx->int_time );
-    sensor_ctrl_set( p_ctx, V4L2_CID_ANALOGUE_GAIN, p_ctx->again_val );
+    rc_exp = sensor_ctrl_set( p_ctx, V4L2_CID_EXPOSURE, p_ctx->int_time );
+    rc_gain = sensor_ctrl_set( p_ctx, V4L2_CID_ANALOGUE_GAIN, p_ctx->again_val );
+
+    /*
+     * The one place where "what the ISP decided" meets "what the sensor was
+     * actually told". Every exposure/gain question so far has had to be
+     * answered by inference from mean output DN; this reports both ends of the
+     * join directly. Off by default, ~1 line/s at 60 fps when on:
+     *   echo 1 > /sys/module/iv009_isp/parameters/isp_trace_exposure
+     */
+    if ( isp_trace_exposure ) {
+        static uint32_t n = 0;
+
+        if ( ( n++ % 60 ) == 0 ) {
+            struct v4l2_ctrl *ce = sensor_ctrl( p_ctx, V4L2_CID_EXPOSURE );
+            struct v4l2_ctrl *cg = sensor_ctrl( p_ctx, V4L2_CID_ANALOGUE_GAIN );
+
+            LOG( LOG_CRIT, "exp trace: isp wants int_time %u again %u | "
+                           "imx415 EXPOSURE cur %d [%lld..%lld] rc %d | "
+                           "ANALOGUE_GAIN cur %d [%lld..%lld] rc %d",
+                 (unsigned int)p_ctx->int_time, (unsigned int)p_ctx->again_val,
+                 ce ? ce->cur.val : -1,
+                 ce ? ce->minimum : -1, ce ? ce->maximum : -1, rc_exp,
+                 cg ? cg->cur.val : -1,
+                 cg ? cg->minimum : -1, cg ? cg->maximum : -1, rc_gain );
+        }
+    }
 }
 
 

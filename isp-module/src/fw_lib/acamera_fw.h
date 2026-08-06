@@ -219,6 +219,10 @@ void acamera_fw_deinit( acamera_context_t *p_ctx );
  * comment on acamera_fw_stream_quiesce() in acamera_fw.c. */
 void acamera_fw_stream_quiesce( void );
 void acamera_fw_stream_rearm( void );
+/* Make a manual exposure/gain change reach the sensor. There is no userspace
+ * 3A daemon here, so nothing else ever raises event_id_exposure_changed --
+ * see the block comment on acamera_fw_exposure_apply() in acamera_fw.c. */
+void acamera_fw_exposure_apply( void );
 int32_t acamera_init_context( acamera_context_t *p_ctx, acamera_settings *settings, acamera_firmware_t *g_fw );
 void acamera_deinit_context( acamera_context_t *p_ctx );
 void acamera_general_interrupt_hanlder( acamera_context_ptr_t p_ctx, uint8_t event );

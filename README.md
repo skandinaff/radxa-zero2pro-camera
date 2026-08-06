@@ -192,8 +192,70 @@ not survive a reboot, by design.
   from that moment. On 4.9 it did not, so the vendor's error log was
   unreachable. It now only fires for a signal that is *not* a stop request.
 
+- **Exposure and gain are controllable.** They previously were not: sweeping
+  `V4L2_CID_EXPOSURE_ABSOLUTE` 16x or `V4L2_CID_GAIN` 32x moved mean output by
+  under 0.05 DN. Three independent faults, all found 2026-08-06:
+
+  1. **Nothing ever applied a manual setting.** ARM's ACamera design splits 3A
+     between the kernel and a *userspace algorithm daemon*: the kernel collects
+     the histogram and publishes it over the `sbuf` channel, and userspace hands
+     back an exposure via `ae_set_new_param()` — the only caller of
+     `event_id_ae_result_ready`, which is the only thing that leads to
+     `event_id_exposure_changed`, which is what makes `cmos_fsm` recompute and
+     program the sensor. This port has no such daemon. An event histogram over
+     300 frames shows it exactly: `ae_stats_ready` 299, `ae_result_ready` 0,
+     `exposure_changed` 0, `sensor_ready` 1. So the whole exposure/gain chain
+     ran once at init and then froze, and every manual control wrote a value
+     into the calibration block that nothing ever read back.
+     `acamera_fw_exposure_apply()` now raises the event directly after a manual
+     set, which is all the manual path needs — it never wanted an algorithm.
+  2. **`V4L2_CID_GAIN` was rejected across its entire range.** `ae_gain()` takes
+     U(x).8 fixed point and refuses anything under `1 << 8`; the conversion
+     built the integer part unshifted, mapping the advertised 100..3200 to
+     1..32. Every set failed with `ERR_BAD_ARGUMENT` — silently, because the
+     ACamera status code was returned as a positive value that the V4L2 core
+     does not read as an error. Both fixed.
+  3. **`V4L2_CID_EXPOSURE_ABSOLUTE` was scaled 10x too large.** The control is
+     defined in 100 µs units; the code multiplied by 1000, i.e. treated it as
+     milliseconds. Against a 16.6 ms frame every value from 17 up saturated at
+     maximum exposure.
+
+  Also corrected: the ISP's gain unit is log2(gain), and the bridge converted it
+  to dB with the factor 20 (the log10 constant) instead of 6.0206. The forward
+  and reverse errors cancelled, so nothing looked wrong, but `again_log2_max`
+  came out as 2.83x instead of 31.6x and everything above a sixth of the range
+  clamped to the same value.
+
+  **Use the direct controls for calibration work**, not the standard V4L2 ones:
+  `manual_exposure_set=1` to pin integration time and all three gains, then
+  `sensor_integration_timet_set` (sensor *lines*) and `sensor_analog_gain_set`
+  (log2 gain x32, so +32 is one stop). `V4L2_CID_EXPOSURE_ABSOLUTE` and
+  `V4L2_CID_GAIN` work, but they run through AE's exposure/gain partitioning
+  against a fixed total-exposure target, so raising one lowers the other and
+  mean output barely moves — correct behaviour for a viewfinder, useless for
+  characterising a sensor.
+
+  Verified by measurement. Exposure doubling at fixed gain
+  (docs/calibration-imx415.md §5.6 "Linearity"): 70/140/280/560/1120 lines gave
+  0.750/1.614/3.794/7.331/15.446 DN — 16x exposure for 20.6x output, residuals
+  under 2 % of full scale against a straight line, with a small negative
+  pedestal (~-0.4 DN) that §5.1 black-level calibration should remove.
+  **PASS.** Gain at fixed exposure now spans the full range monotonically
+  (log2x32 of 32/64/96/128/159 → 0.116/0.380/0.963/2.131/3.620 DN) instead of
+  saturating from 64 up.
+
 **Not working / not done:**
-- **No IQ calibration.** Frames are correctly formed but untuned.
+- **No automatic exposure.** See above: AE requires ARM's userspace 3A daemon,
+  which this port does not have and does not attempt. The kernel side collects
+  and publishes statistics correctly; nothing consumes them. Exposure and gain
+  are manual-only, which is what the CV application wants anyway, but it does
+  mean the image will not adapt to a change in scene brightness.
+- **No IQ calibration yet.** The IMX415 calibration set in
+  `src/calibration/acamera_calibrations_*_linear_imx415.c` builds and loads
+  (`Loaded imx415 calibrations` at `LOG_CRIT` on every boot), and linearity now
+  measures clean, but the two measurements that need physical fixtures — black
+  level (§5.1, needs a lens cap) and lens shading (§5.2, needs a flat-field
+  target) — have not been made. See `docs/calibration-imx415.md`.
 - **The last 96 bytes of each line's stride padding are never written.** The FR
   DMA writer emits 121 aligned 32-byte bursts per line = 3872 bytes, so columns
   3864–3871 are zero-filled by the final burst and columns 3872–3967 keep

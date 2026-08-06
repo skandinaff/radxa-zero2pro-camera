@@ -639,6 +639,60 @@ When a 3A daemon runs:
 
 Run these once the above are in. Each one directly tests a claim made in §4.
 
+> **How to pin exposure and gain (read this first).** Use the direct ISP
+> controls, not `V4L2_CID_EXPOSURE_ABSOLUTE` / `V4L2_CID_GAIN`. The standard
+> controls go through AE's exposure/gain partitioning against a fixed
+> total-exposure target, so raising one lowers the other and mean output barely
+> moves. The direct ones bypass that:
+>
+> ```sh
+> D=/dev/video1
+> v4l2-ctl -d $D -c manual_exposure_set=1        # pin int-time + all 3 gains
+> v4l2-ctl -d $D -c sensor_analog_gain_set=159   # log2(gain) x 32; +32 = one stop
+> v4l2-ctl -d $D -c isp_digital_gain_set=0
+> v4l2-ctl -d $D -c sensor_digital_gain_set=0
+> v4l2-ctl -d $D -c sensor_integration_timet_set=1120   # sensor LINES, not µs
+> ```
+>
+> Integration time is in sensor lines; at the current 60 fps mode there are
+> 135000 lines/s and the usable range is 4..2242. Note anti-flicker (§4.8)
+> quantises requests above one 60 Hz half-period (1125 lines) to multiples of
+> it, so 2240 lines is delivered as 1125 — set
+> `_calibration_cmos_control[0]` to 0 if a calibration needs longer exposures.
+>
+> Set the controls in a separate `v4l2-ctl` invocation *before* the streaming
+> one; they live in the firmware, not on the file handle, so unlike the format
+> they survive `close()`.
+>
+> `echo 1 > /sys/module/iv009_isp/parameters/isp_trace_exposure` logs, about
+> once a second, what AE asked for against what the imx415 subdev's controls
+> actually hold — the fastest way to tell "the ISP is not asking" from "the
+> sensor is not listening".
+
+**Status, 2026-08-06:** Linearity **PASS**, measured after the exposure/gain
+control path was fixed (see the README). At fixed gain, integration times of
+70/140/280/560/1120 lines gave 0.750/1.614/3.794/7.331/15.446 DN — 16x exposure
+for 20.6x output, residuals under 2 % of full scale against a straight line.
+The small negative intercept (~-0.4 DN) is a pedestal error, which is exactly
+what §5.1 is for.
+
+Temporal stability **PASS**, on the frame-to-frame mean: with exposure and gain
+pinned manual, 150 frames (first 50 discarded) gave **0.155 DN peak-to-peak**
+against the 0.5 DN limit, std 0.025 DN, frame-to-frame |Δmean| mean 0.022 /
+max 0.100. The earlier 2.82 DN peak-to-peak was the broken control path
+churning, not the scene.
+
+The "difference image is structureless" half is **inconclusive but shows no
+sign of adaptation**. Block-mean structure sits at ~3x a naive
+independent-pixel noise model, but it barely grows with time separation —
+3.1x between adjacent frames (16.7 ms) versus 3.8x across 1.6 s. A
+scene-adaptive block re-maps every frame, so it would show at 16.7 ms too, and
+it would move the frame mean, which is stable to 0.03 DN. The most likely
+explanation is that the naive model is wrong: the ISP's denoise blocks
+correlate neighbouring pixels' noise, so block means are legitimately noisier
+than std/N. Confirming that needs a genuinely static scene (camera untouched,
+blank surface, nobody moving through frame) and, ideally, sinter bypassed.
+
 * **Linearity** (tests §4.2 gamma + §4.1 pedestal in one shot). Shoot a static
   scene, double the exposure time, and confirm the mean output doubles to within
   a few percent across the range. Any systematic curvature means the gamma is not

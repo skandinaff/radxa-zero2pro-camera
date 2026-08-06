@@ -57,6 +57,29 @@ static int fr_stream_active = 0;
  * already reaches main_firmware.c above. */
 extern void acamera_fw_stream_quiesce( void );
 extern void acamera_fw_stream_rearm( void );
+extern void acamera_fw_exposure_apply( void );
+
+/*
+ * acamera_command() answers with ACamera status codes (SUCCESS, NOT_PERMITTED,
+ * ...) -- small positive numbers, not errnos. Returning those straight out of
+ * s_ctrl() hands the V4L2 core a positive "error", which it does not treat as
+ * one, so a rejected exposure or gain was reported to userspace as success.
+ * That is a large part of why this was hard to see from outside.
+ */
+static int fw_rc_to_errno( uint32_t rc )
+{
+    switch ( rc ) {
+    case SUCCESS:
+        return 0;
+    case NOT_PERMITTED:
+        return -EACCES;
+    case NOT_SUPPORTED:
+    case NOT_IMPLEMENTED:
+        return -ENOTTY;
+    default:
+        return -EINVAL;
+    }
+}
 
 /* ----------------------------------------------------------------
  * fw_interface control interface
@@ -800,10 +823,24 @@ static int fw_intf_set_awb_zone_weight(unsigned long ctrl_val)
     return 0;
 }
 
+/*
+ * The direct, calibration-grade exposure/gain setters: integration time in
+ * sensor *lines*, gains in their native units, no AE arithmetic in between.
+ * These are what docs/calibration-imx415.md 5.1/5.2/5.6 need, and they are the
+ * ones to reach for rather than V4L2_CID_EXPOSURE_ABSOLUTE, which goes through
+ * AE's exposure/gain partitioning and therefore holds total exposure constant.
+ * Use manual_exposure_set=1 first so all four global_manual_* flags are on.
+ *
+ * Each needs acamera_fw_exposure_apply() for the same reason everything else
+ * does: these only write the value into the calibration block, and without a
+ * userspace 3A daemon nothing ever raises event_id_exposure_changed to make
+ * cmos_fsm read it back out. See acamera_fw_exposure_apply().
+ */
 static int fw_intf_set_sensor_integration_time(uint32_t ctrl_val)
 {
     uint32_t manual_sensor_integration_time = ctrl_val;
     acamera_command(TSYSTEM, SYSTEM_INTEGRATION_TIME, manual_sensor_integration_time, COMMAND_SET, &ctrl_val );
+    acamera_fw_exposure_apply();
 
     return 0;
 }
@@ -812,6 +849,7 @@ static int fw_intf_set_sensor_analog_gain(uint32_t ctrl_val)
 {
     uint32_t manual_sensor_analog_gain = ctrl_val;
     acamera_command(TSYSTEM, SYSTEM_SENSOR_ANALOG_GAIN, manual_sensor_analog_gain, COMMAND_SET, &ctrl_val );
+    acamera_fw_exposure_apply();
 
     return 0;
 }
@@ -820,6 +858,7 @@ static int fw_intf_set_isp_digital_gain(uint32_t ctrl_val)
 {
     uint32_t manual_isp_digital_gain = ctrl_val;
     acamera_command(TSYSTEM, SYSTEM_ISP_DIGITAL_GAIN, manual_isp_digital_gain, COMMAND_SET, &ctrl_val );
+    acamera_fw_exposure_apply();
 
     return 0;
 }
@@ -836,6 +875,7 @@ static int fw_intf_set_sensor_digital_gain(uint32_t ctrl_val)
 {
     uint32_t manual_sensor_digital_gain = ctrl_val;
     acamera_command(TSYSTEM, SYSTEM_SENSOR_DIGITAL_GAIN, manual_sensor_digital_gain, COMMAND_SET, &ctrl_val );
+    acamera_fw_exposure_apply();
 
     return 0;
 }
@@ -1218,8 +1258,12 @@ static int isp_fw_do_set_manual_gain( bool enable )
     result = acamera_command( TALGORITHMS, AE_MODE_ID, mode, COMMAND_SET, &ret_val );
     if ( result ) {
         LOG( LOG_ERR, "Failed to set AE_MODE_ID to %u, ret_value: %d.", mode, result );
-        return result;
+        return fw_rc_to_errno( result );
     }
+
+    /* Entering or leaving a manual mode changes which value cmos_fsm will use,
+     * so it has to re-run. See acamera_fw_exposure_apply(). */
+    acamera_fw_exposure_apply();
 #endif
 
     return 0;
@@ -1249,14 +1293,24 @@ static int isp_fw_do_set_gain( int gain )
         return 0;
     }
 
-    gain_frac = gain / 100;
-    gain_frac += ( gain % 100 ) * 256 / 100;
+    /*
+     * ae_gain() wants U(x).8 fixed point and rejects anything below 1 << 8
+     * with ERR_BAD_ARGUMENT. The vendor expression built the integer part
+     * *unshifted* -- gain/100 + (gain%100)*256/100 -- so V4L2_CID_GAIN's whole
+     * advertised range mapped to 1..32, i.e. every value in it was below the
+     * minimum and every set failed. 100 (1.00x) became 1, 3200 (32.00x) became
+     * 32. Shift first, then divide: 100 -> 256, 3200 -> 8192.
+     */
+    gain_frac = ( gain << 8 ) / 100;
 
     result = acamera_command( TALGORITHMS, AE_GAIN_ID, gain_frac, COMMAND_SET, &ret_val );
     if ( result ) {
-        LOG( LOG_ERR, "Failed to set AE_GAIN_ID to %d, ret_value: %d.", gain, result );
-        return result;
+        LOG( LOG_ERR, "Failed to set AE_GAIN_ID to %d (U.8 %d), ret_value: %d.", gain, gain_frac, result );
+        return fw_rc_to_errno( result );
     }
+
+    /* Nothing else will. See acamera_fw_exposure_apply(). */
+    acamera_fw_exposure_apply();
 #endif
 
     return 0;
@@ -1307,8 +1361,12 @@ static int isp_fw_do_set_exposure_auto( int enable )
     result = acamera_command( TALGORITHMS, AE_MODE_ID, mode, COMMAND_SET, &ret_val );
     if ( result ) {
         LOG( LOG_ERR, "Failed to set AE_MODE_ID to %u, ret_value: %d.", mode, result );
-        return result;
+        return fw_rc_to_errno( result );
     }
+
+    /* Entering or leaving a manual mode changes which value cmos_fsm will use,
+     * so it has to re-run. See acamera_fw_exposure_apply(). */
+    acamera_fw_exposure_apply();
 #endif
 
     return 0;
@@ -1354,19 +1412,39 @@ static int isp_fw_do_set_manual_exposure( int enable )
         return ( result_isp_digital_gain );
     }
 
+    /* Switching any of these four between auto and manual changes which value
+     * cmos_fsm will use next, so make it re-run. See
+     * acamera_fw_exposure_apply(). */
+    acamera_fw_exposure_apply();
+
 #endif
 
     return 0;
 }
 
-/* set exposure in us unit */
+/*
+ * V4L2_CID_EXPOSURE_ABSOLUTE, in its documented unit of 100 us, converted to
+ * the microseconds AE_EXPOSURE_ID expects.
+ *
+ * The vendor multiplied by 1000, i.e. treated the control as milliseconds.
+ * ae_exposure() then turns microseconds into lines as
+ * value * lines_per_second / 1e6, and cmos_alloc_integration_time() clamps
+ * that to integration_time_limit. At 60 fps this sensor runs 135000 lines/s
+ * with a limit of 2242 lines (16.6 ms), so with the 1000x scaling every
+ * control value from 17 upwards saturated at maximum exposure -- the entire
+ * useful range collapsed into the bottom 1.6 % of the control. That is the
+ * other half of why a 50 -> 800 sweep produced no change at all.
+ *
+ * At 100x the advertised 1..1000 range spans 0.1 ms to 100 ms, of which
+ * 1..166 is meaningful for a 16.6 ms frame.
+ */
 static int isp_fw_do_set_exposure( int exp )
 {
 #if defined( TALGORITHMS ) && defined( AE_EXPOSURE_ID )
     int result;
     uint32_t ret_val;
 
-    LOG( LOG_INFO, "exp in ms: %d.", exp );
+    LOG( LOG_INFO, "exposure: %d (x100us) = %d us.", exp, exp * 100 );
 
     /* some controls(such brightness) will call acamera_command()
      * before isp_fw initialed, so we need to check.
@@ -1376,11 +1454,17 @@ static int isp_fw_do_set_exposure( int exp )
         return -EBUSY;
     }
 
-    result = acamera_command( TALGORITHMS, AE_EXPOSURE_ID, exp * 1000, COMMAND_SET, &ret_val );
+    result = acamera_command( TALGORITHMS, AE_EXPOSURE_ID, exp * 100, COMMAND_SET, &ret_val );
     if ( result ) {
-        LOG( LOG_ERR, "Failed to set AE_EXPOSURE_ID to %d, ret_value: %d.", exp, result );
-        return result;
+        LOG( LOG_ERR, "Failed to set AE_EXPOSURE_ID to %d, ret_value: %d. "
+                      "(NOT_PERMITTED means AE is not in a manual-integration-time mode: "
+                      "set V4L2_CID_EXPOSURE_AUTO to MANUAL first.)",
+             exp, result );
+        return fw_rc_to_errno( result );
     }
+
+    /* Nothing else will. See acamera_fw_exposure_apply(). */
+    acamera_fw_exposure_apply();
 #endif
     return 0;
 }

@@ -47,6 +47,7 @@
 static const acam_reg_t **p_isp_data = SENSOR_ISP_SEQUENCE_DEFAULT;
 
 extern void acamera_notify_evt_data_avail( void );
+extern void *acamera_get_api_ctx_ptr( void );
 
 void acamera_load_isp_sequence( uintptr_t isp_base, const acam_reg_t **sequence, uint8_t num )
 {
@@ -242,6 +243,51 @@ void acamera_fw_stream_rearm( void )
     /* Arm the input port before the sensor starts, not after, so the very
      * first frame is accepted rather than dropped. */
     acamera_isp_input_port_mode_request_write( 0, ACAMERA_ISP_INPUT_PORT_MODE_REQUEST_SAFE_START );
+}
+
+/*
+ * Push a manual exposure/gain change through to the sensor.
+ *
+ * Why this has to exist -- measured 2026-08-06. ARM's ACamera design splits
+ * 3A between the kernel and a userspace algorithm daemon: the kernel's AE FSM
+ * collects the histogram (ACAMERA_IRQ_AE_STATS -> event_id_ae_stats_ready) and
+ * publishes it over the sbuf shared-buffer channel, and userspace computes the
+ * new exposure and hands it back via ae_set_new_param(). That function is the
+ * *only* caller of fsm_raise_event( event_id_ae_result_ready ), which is the
+ * only thing AE_fsm_process_event() handles, and which in turn is what raises
+ * event_id_exposure_changed -- the event that makes cmos_fsm re-run
+ * cmos_inttime_update() / cmos_analog_gain_update() / cmos_update_exposure_
+ * history() and actually program the sensor.
+ *
+ * This port has no userspace 3A daemon. An event histogram over a 300-frame
+ * capture makes the consequence exact:
+ *
+ *   event_id_ae_stats_ready        299     <- stats collected, every frame
+ *   event_id_ae_result_ready         0     <- nobody ever answers
+ *   event_id_exposure_changed        0
+ *   event_id_sensor_ready            1     <- once, at init
+ *
+ * So the whole exposure/gain chain runs exactly once, on that single
+ * event_id_sensor_ready at init, and then freezes. "Auto" exposure is not a
+ * loop, it is a one-shot; and every manual control writes its value into the
+ * calibration block (cmos_control_param_t) where nothing ever reads it again.
+ * That is why sweeping V4L2_CID_EXPOSURE_ABSOLUTE 16x and V4L2_CID_GAIN 32x
+ * both moved mean output by under 0.05 DN.
+ *
+ * Raising the event by hand after a manual set is the missing half. It costs
+ * one event-queue push and reuses the vendor's own apply path, so the manual
+ * case -- the one that does not need an algorithm at all -- works exactly as
+ * the design intends. Automatic AE still requires the userspace daemon and is
+ * out of scope here.
+ */
+void acamera_fw_exposure_apply( void )
+{
+    acamera_context_t *p_ctx = (acamera_context_t *)acamera_get_api_ctx_ptr();
+
+    if ( p_ctx == NULL )
+        return;
+
+    acamera_fsm_mgr_raise_event( &p_ctx->fsm_mgr, event_id_exposure_changed );
 }
 
 /*
