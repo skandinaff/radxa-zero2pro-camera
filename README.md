@@ -159,6 +159,39 @@ not survive a reboot, by design.
   programs VMAX at runtime, so the frame rate can be dropped back toward 30 fps
   *without* giving back the skew improvement.
 
+- **STREAMOFF is clean, and streaming sessions now repeat.** Previously every
+  STREAMOFF ended with the ISP error routine firing on `BROKEN_FRAME` and left
+  the block unusable until the board was rebooted. The cause was ordering:
+  `fw_intf_stream_stop()` tore the sensor and MIPI down first, cutting CSI-2
+  off mid-frame, so the ISP saw a truncated frame and `fr_pipeline_busy`
+  latched at 1 with no way to ever clear (the register's own documentation says
+  `global_fsm_reset` may only be asserted while that bit is low). The error
+  routine then correctly refused to restart and left interrupts masked — and
+  nothing on the STREAMON path ever unmasked them again, because
+  `acamera_fw_init()` runs only at module load. The hardware was never wedged;
+  the state was.
+
+  Fixed by draining the ISP *before* the sensor stops
+  (`acamera_fw_stream_quiesce()`: SAFE_STOP, then wait for `fr_pipeline_busy`
+  to clear while pixels are still flowing) and re-arming interrupts, the input
+  port and the error budget on every STREAMON (`acamera_fw_stream_rearm()`).
+  Verified 2026-08-06: five consecutive 60-frame captures in one module load,
+  three more across a full `unload.sh`/`load.sh` cycle, every one passing the
+  stride-autocorrelation check (peak at lag 3968, r = 0.93–0.96), and zero ISP
+  error-routine entries in dmesg across the lot.
+
+  `scripts/unload.sh` also had its order corrected — `iv009_isp` must come off
+  before `imx415`, since the ISP's `v4l2_async` notifier holds a reference on
+  the sensor subdev and `rmmod imx415` returned `EBUSY` otherwise, silently
+  leaving the sensor module loaded across every "full" unload.
+
+  The `[Stream#0] Error: wait_event return < 0` that accompanied every
+  STREAMOFF was a separate 4.9→6.1 artifact, now suppressed: 6.1's
+  `kthread_stop()` sets `TIF_NOTIFY_SIGNAL` before waking the target, so every
+  `wait_event_interruptible*` in the stream-copy thread returns `-ERESTARTSYS`
+  from that moment. On 4.9 it did not, so the vendor's error log was
+  unreachable. It now only fires for a signal that is *not* a stop request.
+
 **Not working / not done:**
 - **No IQ calibration.** Frames are correctly formed but untuned.
 - **The last 96 bytes of each line's stride padding are never written.** The FR
@@ -169,11 +202,6 @@ not survive a reboot, by design.
   `dma_alloc_coherent()` hands back zeroed pages and only ISP writes ever land
   there. But it does mean **"padding is all zero" is not a valid check that a
   capture is correct**; use the stride autocorrelation instead.
-- **The ISP error routine still fires once at STREAMOFF** (`broken_frame`,
-  `fr_pipeline_busy` stuck during teardown), together with
-  `wait_event return < 0` from the stream-copy thread. Harmless to a capture
-  that has already finished; it does mean the ISP must be reloaded, and in
-  practice the board rebooted, between streaming sessions.
 - **23 buffers dropped at stream start**, then none: all three of `v4l2-ctl`'s
   progress lines across the 120-frame run reported the same cumulative 23, so
   it is a startup transient (the ISP settling over roughly the first 0.4 s),

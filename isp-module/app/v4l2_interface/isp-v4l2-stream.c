@@ -946,6 +946,22 @@ static int isp_v4l2_stream_copy_thread( void *data )
         if ( wait_event_interruptible_timeout( frame_mgr->frame_wq,
             (ISP_FW_FRAME_BUF_VALID == frame_mgr->frame_buffer.state),
             msecs_to_jiffies( 10 ) ) < 0 ) {
+            /*
+             * 4.9 -> 6.1 porting artifact, not a fault. kthread_stop() now
+             * sets TIF_NOTIFY_SIGNAL on the target before waking it, so
+             * signal_pending() is true from that moment on and *every*
+             * interruptible wait in this thread returns -ERESTARTSYS. On 4.9
+             * kthread_stop() only set the should-stop bit, so this branch was
+             * effectively unreachable and the vendor logged it as an error.
+             *
+             * That is why a completely clean STREAMOFF still printed
+             * "[Stream#N] Error: wait_event return < 0" exactly once. Loop
+             * round and let kthread_should_stop() at the top of the loop do
+             * the exiting; only complain if we are *not* being stopped, which
+             * would be a genuine unexpected signal.
+             */
+            if ( kthread_should_stop() )
+                continue;
             LOG( LOG_ERR, "[Stream#%d] Error: wait_event return < 0", pstream->stream_id );
             continue;
         }

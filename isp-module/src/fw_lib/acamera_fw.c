@@ -117,6 +117,134 @@ void acamera_fw_deinit( acamera_context_t *p_ctx )
 }
 
 /*
+ * Stream teardown/restart, called from the V4L2 STREAMOFF/STREAMON path
+ * (fw-interface.c) around the sensor's own start/stop.
+ *
+ * Why these exist -- measured on hardware 2026-08-06. Every STREAMOFF ended
+ * with the ISP error routine firing exactly once, on BROKEN_FRAME (irq_mask
+ * 0x8), with broken_frame status 3 = "active width mismatch | active height
+ * mismatch" and fr_pipeline_busy latched at 1. The order of events in dmesg is
+ * unambiguous:
+ *
+ *   AM_MIPI: am_mipi_deinit:Success mipi deinit
+ *   Found error resetting ISP. MASK is 0x8
+ *   input_port: mode_status 0 hc_size0 3864 vc_size 2192
+ *   monitor: fr_pipeline_busy 1 broken_frame 3 ...
+ *   stopping isp failed, timeout. mode_status 0 (want 0), fr_pipeline_busy 1
+ *
+ * i.e. the *sensor* side was torn down first. fw_intf_stream_stop() issued
+ * SENSOR_STREAMING OFF, which runs V4L2_drv.c stop_streaming(): imx415
+ * s_stream(0), am_adap_deinit(), am_mipi_deinit(). That cuts the CSI-2 data
+ * off in the middle of whatever frame the ISP was receiving. A truncated frame
+ * is a broken frame by definition, and the main pipeline -- which is waiting
+ * for the rest of it -- keeps fr_pipeline_busy asserted, forever, because the
+ * remaining lines are never going to arrive.
+ *
+ * The error routine then cannot do its job either. Note the register comment
+ * on fr_pipeline_busy in acamera_isp_config.h: "global_fsm_reset must be set
+ * when this busy signal is low." With the source of pixels already gone, the
+ * busy bit can never go low, so the routine times out, correctly refuses to
+ * restart, and leaves the ISP with all interrupts masked
+ * (ISP_IRQ_DISABLE_ALL_IRQ) and the input port in SAFE_STOP.
+ *
+ * Nothing in the STREAMON path ever undid that. acamera_fw_init() -- the only
+ * thing that unmasks interrupts and clears acamera_fw_error_count -- runs once
+ * per acamera_init_context(), i.e. at module load, and sensor_sw_init() (the
+ * only writer of SAFE_START) runs only on a preset-mode change. So the second
+ * VIDIOC_STREAMON in the life of a module load restarted the sensor happily
+ * and then blocked forever: interrupt_mask_vector still 0xffffffff, input port
+ * still SAFE_STOP, ISP interrupt count flat. That is what made a reboot
+ * necessary between streaming sessions -- not, as previously assumed, wedged
+ * hardware. Reading the ISP after a failed teardown shows 0x50 == 0, i.e.
+ * fr_pipeline_busy and broken_frame both clear: the global FSM reset the error
+ * routine issues does land, and the block is idle and healthy.
+ *
+ * So, two halves:
+ *
+ *   quiesce  Stop the ISP input port *before* the sensor, and wait for the
+ *            pipeline to drain. SAFE_STOP means "finish the frame you are on,
+ *            then stop", so it only works while pixels are still flowing --
+ *            which is exactly the window this closes. Once fr_pipeline_busy
+ *            reads 0 there is no frame in flight, and dropping MIPI cannot
+ *            break one.
+ *
+ *   rearm    Undo, on every stream start, everything a previous bad teardown
+ *            could have latched: the error budget, the interrupt mask and the
+ *            input port request. Belt and braces -- with quiesce in place the
+ *            error routine should not run at all -- but it is what makes a
+ *            session recoverable without a module reload, and it costs four
+ *            register writes.
+ */
+
+/* One frame at 60 fps is 16.7 ms; 2 lanes at 30 fps is 33.3 ms. Allow well
+ * over two worst-case frame periods before declaring the drain failed. */
+#define ACAMERA_FW_QUIESCE_TIMEOUT_MS 200
+
+void acamera_fw_stream_quiesce( void )
+{
+    uint32_t ms;
+
+    /* Ask the input port to stop at the next frame boundary. Deliberately not
+     * touching the DMA writer or the interrupt mask first: the writer must
+     * stay armed so the in-flight frame can complete, and the FS/FE interrupts
+     * are what advance it. */
+    acamera_isp_input_port_mode_request_write( 0, ACAMERA_ISP_INPUT_PORT_MODE_REQUEST_SAFE_STOP );
+
+    for ( ms = 0; ms < ACAMERA_FW_QUIESCE_TIMEOUT_MS; ms++ ) {
+        if ( acamera_isp_input_port_mode_status_read( 0 ) == ACAMERA_ISP_INPUT_PORT_MODE_REQUEST_SAFE_STOP &&
+             !acamera_isp_isp_global_monitor_fr_pipeline_busy_read( 0 ) )
+            break;
+
+        system_timer_usleep( 1000 );
+    }
+
+    if ( ms >= ACAMERA_FW_QUIESCE_TIMEOUT_MS ) {
+        LOG( LOG_CRIT, "ISP did not quiesce in %u ms: mode_status %u fr_pipeline_busy %u broken_frame %u. "
+                       "Tearing down anyway; stream restart will re-arm.",
+             (unsigned int)ACAMERA_FW_QUIESCE_TIMEOUT_MS,
+             (unsigned int)acamera_isp_input_port_mode_status_read( 0 ),
+             (unsigned int)acamera_isp_isp_global_monitor_fr_pipeline_busy_read( 0 ),
+             (unsigned int)acamera_isp_isp_global_monitor_broken_frame_status_read( 0 ) );
+    } else {
+        LOG( LOG_INFO, "ISP quiesced in %u ms", (unsigned int)ms );
+    }
+
+    /* Pipeline is idle (or hopeless). Silence the block so that nothing the
+     * sensor/adapter/MIPI teardown does downstream of here can raise a
+     * spurious error interrupt.
+     *
+     * Deliberately *not* clearing the FR DMA writer's frame_write_on bits the
+     * way acamera_fw_error_routine() does. Those accessors live in
+     * acamera_isp1_config.h and write the software config shadow via
+     * system_sw_*, not the hardware; the value only reaches the ISP when the
+     * page is DMA'd across at the next frame start. In the error routine there
+     * is a next frame start, so clearing it there is meaningful. Here there
+     * deliberately is not one -- the input port is stopped and interrupts are
+     * about to be masked -- so the write would achieve nothing, and getting its
+     * base argument wrong is an oops rather than a no-op: unlike the
+     * acamera_isp_config.h / system_hw_* accessors used above, which ignore
+     * their base in favour of the single ioremap in system_hw_io.c, these
+     * dereference (base + offset) directly. Measured the hard way, 2026-08-06. */
+    acamera_isp_isp_global_interrupt_mask_vector_write( 0, ISP_IRQ_DISABLE_ALL_IRQ );
+}
+
+void acamera_fw_stream_rearm( void )
+{
+    /* A previous session's error routine may have exhausted the budget. */
+    acamera_fw_error_count = 0;
+
+    /* Drop anything latched while we were masked, then unmask. The 0/1 pulse
+     * is the same clear sequence acamera_interrupt_handler() uses. */
+    acamera_isp_isp_global_interrupt_clear_write( 0, 0 );
+    acamera_isp_isp_global_interrupt_clear_write( 0, 1 );
+    acamera_isp_isp_global_interrupt_mask_vector_write( 0, ISP_IRQ_MASK_VECTOR );
+
+    /* Arm the input port before the sensor starts, not after, so the very
+     * first frame is accepted rather than dropped. */
+    acamera_isp_input_port_mode_request_write( 0, ACAMERA_ISP_INPUT_PORT_MODE_REQUEST_SAFE_START );
+}
+
+/*
  * The vendor code retries forever. On this board that is actively dangerous:
  * when the error is persistent (a FRAME_COLLISION that repeats every frame),
  * the retry loop re-arms a pipeline that is still mid-DMA, and within ~70 ms

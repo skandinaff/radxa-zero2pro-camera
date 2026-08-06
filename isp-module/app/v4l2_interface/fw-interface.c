@@ -43,6 +43,21 @@ static int isp_started = 0;
 static int custom_wdr_mode = 0;
 static int custom_exp = 0;
 
+/*
+ * Whether the FR stream has actually been started (sensor streaming) since the
+ * last stop. fw_intf_stream_stop() is called far more often than it is useful:
+ * on close(), on the STREAMON failure path, and once per stream type on every
+ * open(). Only the FR-started case needs the ISP drained. See
+ * acamera_fw_stream_quiesce().
+ */
+static int fr_stream_active = 0;
+
+/* Defined in src/fw_lib/acamera_fw.c. Declared here rather than by including
+ * acamera_fw.h, which pulls in the whole FSM manager, matching how this file
+ * already reaches main_firmware.c above. */
+extern void acamera_fw_stream_quiesce( void );
+extern void acamera_fw_stream_rearm( void );
+
 /* ----------------------------------------------------------------
  * fw_interface control interface
  */
@@ -283,6 +298,13 @@ int fw_intf_stream_start( isp_v4l2_stream_type_t streamType )
     }
 #endif
     if (streamType == V4L2_STREAM_TYPE_FR) {
+        /* Undo anything a previous session left latched (masked interrupts,
+         * SAFE_STOP, a spent error budget) before pixels start arriving.
+         * acamera_fw_init() only runs at module load, so without this a second
+         * STREAMON in the same load starts the sensor into a deaf ISP. */
+        acamera_fw_stream_rearm();
+        fr_stream_active = 1;
+
         LOG( LOG_CRIT, "TRACE fw_intf_stream_start: about to acamera_command(SENSOR_STREAMING, ON)" );
         acamera_command( TSENSOR, SENSOR_STREAMING, ON, COMMAND_SET, &rc );
         LOG( LOG_CRIT, "TRACE fw_intf_stream_start: acamera_command(SENSOR_STREAMING, ON) returned, rc = %u", rc );
@@ -315,6 +337,28 @@ void fw_intf_stream_stop( isp_v4l2_stream_type_t streamType )
 #endif
 
     if (streamType == V4L2_STREAM_TYPE_FR) {
+        /*
+         * Order matters, and it used to be the wrong way round. SENSOR_STREAMING
+         * OFF runs V4L2_drv.c stop_streaming(), which does s_stream(0) +
+         * am_adap_deinit() + am_mipi_deinit() -- i.e. it cuts the CSI-2 data off
+         * wherever it happens to be, mid-frame. The ISP then sees a truncated
+         * frame (BROKEN_FRAME, status 3 = width+height mismatch) and its main
+         * pipeline stays busy waiting for lines that will never arrive.
+         *
+         * So drain the ISP first, while pixels are still flowing and SAFE_STOP
+         * can still be honoured at a frame boundary.
+         *
+         * The fr_stream_active guard is for the calls where nothing was ever
+         * started: isp_v4l2_stream_off() also runs on every close() and on the
+         * STREAMON failure path, and this function is additionally reached once
+         * per stream type on open(). With no sensor streaming there is no frame
+         * to finish, so the drain could only ever burn its full timeout.
+         */
+        if ( fr_stream_active ) {
+            acamera_fw_stream_quiesce();
+            fr_stream_active = 0;
+        }
+
         acamera_command( TSENSOR, SENSOR_STREAMING, OFF, COMMAND_SET, &rc );
         acamera_api_dma_buff_queue_reset(dma_fr);
     } else if (streamType == V4L2_STREAM_TYPE_DS1) {

@@ -215,6 +215,10 @@ void acamera_fw_process( acamera_context_t *p_ctx );
 
 void acamera_fw_init( acamera_context_t *p_ctx );
 void acamera_fw_deinit( acamera_context_t *p_ctx );
+/* Per-stream (STREAMON/STREAMOFF) counterparts of the above -- see the block
+ * comment on acamera_fw_stream_quiesce() in acamera_fw.c. */
+void acamera_fw_stream_quiesce( void );
+void acamera_fw_stream_rearm( void );
 int32_t acamera_init_context( acamera_context_t *p_ctx, acamera_settings *settings, acamera_firmware_t *g_fw );
 void acamera_deinit_context( acamera_context_t *p_ctx );
 void acamera_general_interrupt_hanlder( acamera_context_ptr_t p_ctx, uint8_t event );

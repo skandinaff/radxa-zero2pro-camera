@@ -176,6 +176,16 @@ diff smaller).
   `ktime_t`/`ktime_get()`/`ktime_to_ms(ktime_sub(end, begin))` -- simpler
   than reconstructing calendar-time semantics that weren't needed anyway.
   Added `#include <linux/ktime.h>`.
+- `isp_v4l2_stream_copy_thread()`: the `wait_event_interruptible_timeout()`
+  failure branch became reachable, and had to be taught that it is not a
+  failure. 6.1's `kthread_stop()` sets `TIF_NOTIFY_SIGNAL` on the target before
+  waking it, so from that instant `signal_pending()` is true and every
+  interruptible wait in the thread returns `-ERESTARTSYS`. 4.9's did not -- it
+  only set the should-stop bit -- so the vendor's
+  `LOG_ERR "wait_event return < 0"` was effectively dead code there. Here it
+  printed on every single clean STREAMOFF and read as a teardown fault. Now
+  guarded on `kthread_should_stop()`, so it only reports a signal that is
+  genuinely not a stop request.
 
 ### `app/v4l2_interface/isp-v4l2.c`
 - Same `<linux/dma-contiguous.h>` -> `<linux/dma-map-ops.h>` header move
