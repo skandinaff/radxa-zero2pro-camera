@@ -16,13 +16,13 @@ fi
 printf '\n=== overlay nodes in live devicetree ===\n'
 for n in /proc/device-tree/soc/bus@ff600000/bus@3c000/system-controller@0/isp-clkc \
          /proc/device-tree/isp@ff140000 \
-         /proc/device-tree/soc/bus@ffd00000/i2c@1c000/camera-sensor@1a; do
+         /proc/device-tree/soc/bus@ff800000/i2c@5000/camera-sensor@1a; do
 	[ -d "$n" ] && printf '  present: %s\n' "$n"
 done
 
-printf '\n=== sensor on i2c-3 (expect 0x1a) ===\n'
+printf '\n=== sensor on VIM3 Camera0 I2C_AO / i2c-0 (candidate 0x1a) ===\n'
 if command -v i2cdetect >/dev/null; then
-	i2cdetect -y 3 2>&1 | sed 's/^/  /'
+	i2cdetect -y 0 2>&1 | sed 's/^/  /'
 else
 	printf '  i2cdetect not installed (sudo apt install i2c-tools)\n'
 fi

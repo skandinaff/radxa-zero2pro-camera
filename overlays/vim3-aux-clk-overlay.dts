@@ -1,0 +1,23 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Khadas VIM3 (A311D/G12B) runtime clock-provider overlay.
+ *
+ * The target is the live HHI syscon node. The compatible is served by
+ * isp-clkc/isp_clkc.ko. This overlay is reversible via dtbo_loader.ko.
+ */
+
+/ {
+	fragment@0 {
+		target-path = "/soc/bus@ff600000/bus@3c000/system-controller@0";
+
+		__overlay__ {
+			isp_clkc: isp-clkc {
+				compatible = "khadas,vim3-isp-clkc";
+				#clock-cells = <1>;
+				status = "okay";
+			};
+		};
+	};
+};

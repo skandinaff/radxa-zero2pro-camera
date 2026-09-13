@@ -15,8 +15,8 @@ STAGE=${1:-full}
 [ "$(id -u)" -eq 0 ] || { echo "error: must run as root" >&2; exit 1; }
 
 case "$STAGE" in
-clk)   DTBO="$ROOT/overlays/aux-clk-overlay.dtbo" ;;
-full)  DTBO="$ROOT/overlays/camera-overlay.dtbo" ;;
+clk)   DTBO="$ROOT/overlays/vim3-aux-clk-overlay.dtbo" ;;
+full)  DTBO="$ROOT/overlays/vim3-camera-overlay.dtbo" ;;
 *)     echo "usage: $0 [clk|full]" >&2; exit 1 ;;
 esac
 
@@ -49,8 +49,8 @@ for m in v4l2-async v4l2-fwnode videobuf2-vmalloc; do
 	modprobe "$m" && printf '  %s\n' "$m"
 done
 
-# Route CLK12_24 to GPIOAO_10 so the sensor actually gets its MCLK. Must come
-# before imx415: with no clock the IMX415 does not respond on i2c at all.
+# Route the VIM3's CLK12_24 to GPIOAO_10. This follows the VIM3 5.15 camera
+# stack's required MCLK behaviour and must precede IMX415 probing.
 printf '=== insmod ao_mclk (camera MCLK pinmux) ===\n'
 insmod "$ROOT/ao-mclk/ao_mclk.ko"
 

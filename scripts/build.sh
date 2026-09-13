@@ -1,6 +1,6 @@
 #!/bin/sh
-# Build all four kernel modules and compile the devicetree overlays.
-# Run this ON the Radxa Zero 2 Pro (needs linux-headers for the running kernel).
+# Build the VIM3 G12B camera runtime modules and VIM3-only overlays.
+# KDIR may point at an out-of-tree prepared kernel build.
 set -e
 
 cd "$(dirname "$0")/.."
@@ -19,7 +19,8 @@ for d in dtbo-loader isp-clkc ao-mclk imx415 isp-module; do
 done
 
 printf '=== overlays ===\n'
-for f in "$ROOT"/overlays/*.dts; do
+for f in "$ROOT"/overlays/vim3-aux-clk-overlay.dts \
+         "$ROOT"/overlays/vim3-camera-overlay.dts; do
 	out="${f%.dts}.dtbo"
 	# -@ is required: the overlays reference labels (&isp_clkc, &imx415_ep,
 	# ...) and need __symbols__/__local_fixups__ to resolve at apply time.

@@ -663,7 +663,7 @@ static int isp_clkc_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id isp_clkc_of_match[] = {
-	{ .compatible = "radxa,zero2pro-isp-clkc" },
+	{ .compatible = "khadas,vim3-isp-clkc" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, isp_clkc_of_match);
