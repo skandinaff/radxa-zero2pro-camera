@@ -320,13 +320,38 @@ int fw_intf_stream_start( isp_v4l2_stream_type_t streamType )
 #endif
     }
 #endif
-    if (streamType == V4L2_STREAM_TYPE_FR) {
-        /* Undo anything a previous session left latched (masked interrupts,
-         * SAFE_STOP, a spent error budget) before pixels start arriving.
-         * acamera_fw_init() only runs at module load, so without this a second
-         * STREAMON in the same load starts the sensor into a deaf ISP. */
-        acamera_fw_stream_rearm();
-        fr_stream_active = 1;
+    /*
+     * FR *or* DS1 starts the sensor.
+     *
+     * This condition read "== V4L2_STREAM_TYPE_FR" only, dropping the DS1 half
+     * of the upstream Khadas condition (common_drivers khadas-vims-5.15.y,
+     * drivers/armisp-g12b/.../fw-interface.c, fw_intf_stream_start():
+     * "streamType == V4L2_STREAM_TYPE_FR || streamType == V4L2_STREAM_TYPE_DS1").
+     * The two paths share one sensor; DS1 differs from FR only in that the ISP
+     * scales the output on the way to a different DMA writer, so starting DS1
+     * must turn the sensor on exactly as FR does.
+     *
+     * The omission failed quietly: VIDIOC_STREAMON on the DS1 stream returned
+     * 0 and its stream thread started, but the sensor was never told to
+     * stream, so no frame ever completed and userspace blocked forever in
+     * VIDIOC_DQBUF. Only the start side was asymmetric -- fw_intf_stream_stop()
+     * kept its DS1 branch.
+     */
+    if (streamType == V4L2_STREAM_TYPE_FR || streamType == V4L2_STREAM_TYPE_DS1) {
+        if (streamType == V4L2_STREAM_TYPE_FR) {
+            /* Undo anything a previous session left latched (masked
+             * interrupts, SAFE_STOP, a spent error budget) before pixels start
+             * arriving. acamera_fw_init() only runs at module load, so without
+             * this a second STREAMON in the same load starts the sensor into a
+             * deaf ISP.
+             *
+             * This rearm is ours, not upstream's -- the reference does nothing
+             * here but SENSOR_STREAMING ON -- so keep it scoped to FR.
+             * Applying it on the DS1 path too hard-hung the board on the first
+             * DS1 STREAMON (watchdog reset, nothing recorded in pstore). */
+            acamera_fw_stream_rearm();
+            fr_stream_active = 1;
+        }
 
         LOG( LOG_CRIT, "TRACE fw_intf_stream_start: about to acamera_command(SENSOR_STREAMING, ON)" );
         acamera_command( TSENSOR, SENSOR_STREAMING, ON, COMMAND_SET, &rc );
