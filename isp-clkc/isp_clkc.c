@@ -45,11 +45,12 @@
  *   4 = csi2_phy0  gate (HHI_GCLK_MPEG2 bit 29)
  *   5 = csi2_phy1  gate (HHI_GCLK_MPEG2 bit 28)
  *   6 = gen_clk    composite (mux->div->gate @ HHI_GEN_CLK_CNTL, 0x228) --
- *       the sensor MCLK source. NOTE: on the VIM3 this reaches the camera
- *       connector on GPIOAO_11 (mux 4, GEN_CLK_EE), NOT on GPIOAO_10 /
- *       "CLK12_24" as on the Radxa Zero 2 Pro -- GPIOAO_10 is SPDIF_OUT on
- *       VIM3. ao_mclk.ko is what actually programs this on the VIM3, and its
- *       header carries the schematic evidence. Same missing-from-mainline
+ *       the sensor MCLK source, consumed directly by the sensor node as its
+ *       "inck". On the VIM3 it reaches the camera connector on GPIOAO_11
+ *       (mux 4, GEN_CLK_EE), NOT on GPIOAO_10 / "CLK12_24" as on the Radxa
+ *       Zero 2 Pro -- GPIOAO_10 is SPDIF_OUT on VIM3. This driver owns that
+ *       routing too (see birdcher,gen-clk-pad below); there is deliberately
+ *       no second module poking the same register. Same missing-from-mainline
  *       story as 0/1: dt-bindings/clock/g12a-clkc.h and clk_summary on the
  *       live board both have zero CLKID_GEN_CLK/"gen_clk" hits, confirmed
  *       the same way as the ISP/CSI-PHY clocks were. Unlike 0/1, this
@@ -70,8 +71,10 @@
  */
 
 #include <linux/bitops.h>
+#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/err.h>
+#include <linux/io.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -85,6 +88,44 @@
 #define HHI_MIPI_ISP_CLK_CNTL		0x1c0
 #define HHI_GEN_CLK_CNTL		0x228
 #define HHI_MIPI_CSI_PHY_CLK_CNTL	0x340
+
+/*
+ * Routing gen_clk to its output pad.
+ *
+ * gen_clk is only useful if it actually reaches a pin. On the VIM3 the camera
+ * connector's CAM_MCLK is GPIOAO_11 (ball BF16) with the GEN_CLK_EE alt
+ * function -- see vim3-sch-v15.pdf and the vendor pinctrl table
+ * (gen_clk_ee_ao_pins[] = { GPIOAO_11 }, GROUP(gen_clk_ee_ao, 4)).
+ *
+ * Mainline's pinctrl-meson-g12a.c models only pwm_ao_a (mux 3) and
+ * pwm_ao_a_hiz (mux 2) on that pad -- there is no gen_clk group -- so the
+ * routing cannot be expressed as a pinctrl-0 phandle from DT. The clock
+ * provider therefore owns its own output routing, which keeps one driver
+ * responsible for the whole gen_clk path instead of splitting the register
+ * and the pad across two modules.
+ *
+ * Which pad, and which mux value, stays a board fact in DT:
+ *
+ *   birdcher,gen-clk-pad = <11 4>;   / * GPIOAO_11, GEN_CLK_EE * /
+ *
+ * Absent the property nothing is touched and gen_clk stays internal.
+ *
+ * AO_RTI_PINMUX_REG1 is at 0xff800018 (AO base + offset 0x06 * 4) and holds
+ * GPIOAO_8..11 in bits [3:0], [7:4], [11:8], [15:12]. It belongs to the AO
+ * pinctrl block rather than our HHI syscon, so it needs its own mapping; the
+ * previous field value is saved and restored on unbind.
+ */
+#define AO_PINMUX_REG1		0xff800018
+#define AO_PINMUX_FIRST_PAD	8
+#define AO_PINMUX_LAST_PAD	11
+#define AO_PAD_SHIFT(pad)	(((pad) - AO_PINMUX_FIRST_PAD) * 4)
+#define AO_PAD_MASK(pad)	(0xfu << AO_PAD_SHIFT(pad))
+
+struct isp_clkc_pad {
+	void __iomem	*reg;
+	u32		mask;
+	u32		saved;
+};
 
 #define NR_CLKS			7
 #define CLKID_ISP_COMP		0
@@ -474,6 +515,127 @@ static int isp_clkc_register_gate(struct device *dev, struct regmap *map,
 	return devm_clk_hw_register(dev, &gate->hw);
 }
 
+static void isp_clkc_gen_clk_disable(void *data)
+{
+	clk_disable_unprepare(data);
+}
+
+/* Restore the pad's original mux field when this driver goes away. */
+static void isp_clkc_pad_restore(void *data)
+{
+	struct isp_clkc_pad *pad = data;
+
+	writel((readl(pad->reg) & ~pad->mask) | pad->saved, pad->reg);
+	iounmap(pad->reg);
+}
+
+/*
+ * Route gen_clk to its board-specified output pad. Optional: boards that do
+ * not expose gen_clk simply omit "birdcher,gen-clk-pad".
+ */
+static int isp_clkc_setup_gen_clk_pad(struct device *dev,
+				      struct isp_clkc_priv *priv)
+{
+	struct isp_clkc_pad *pad;
+	struct clk *gen_clk;
+	u32 vals[2];
+	u32 pad_nr, mux;
+	int ret;
+
+	ret = of_property_read_u32_array(dev->of_node, "birdcher,gen-clk-pad",
+					 vals, ARRAY_SIZE(vals));
+	if (ret == -EINVAL)
+		return 0;	/* property absent - nothing to route */
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "malformed birdcher,gen-clk-pad\n");
+
+	pad_nr = vals[0];
+	mux = vals[1];
+	if (pad_nr < AO_PINMUX_FIRST_PAD || pad_nr > AO_PINMUX_LAST_PAD ||
+	    mux > 0xf)
+		return dev_err_probe(dev, -EINVAL,
+				     "birdcher,gen-clk-pad: GPIOAO_%u mux %u out of range\n",
+				     pad_nr, mux);
+
+	pad = devm_kzalloc(dev, sizeof(*pad), GFP_KERNEL);
+	if (!pad)
+		return -ENOMEM;
+
+	pad->reg = ioremap(AO_PINMUX_REG1, 4);
+	if (!pad->reg)
+		return -ENOMEM;
+
+	pad->mask = AO_PAD_MASK(pad_nr);
+	pad->saved = readl(pad->reg) & pad->mask;
+
+	ret = devm_add_action_or_reset(dev, isp_clkc_pad_restore, pad);
+	if (ret) {
+		iounmap(pad->reg);
+		return ret;
+	}
+
+	writel((readl(pad->reg) & ~pad->mask) | (mux << AO_PAD_SHIFT(pad_nr)),
+	       pad->reg);
+
+	/*
+	 * Keep gen_clk running for as long as it is routed out.
+	 *
+	 * A pad that is muxed to a clock output but whose clock is gated off is
+	 * just a dead pin, and the CSI/ISP side assumes a stable sensor MCLK.
+	 * More concretely: mainline's imx415 waits only ~100us after
+	 * clk_prepare_enable() before its first register write, because it
+	 * expects INCK to be a free-running crystal. Amlogic's own IMX415 driver
+	 * waits 30ms instead, precisely because it gates this clock. Starting the
+	 * clock cold inside the sensor's power-on therefore loses the race and
+	 * the sensor NAKs with -ENXIO.
+	 *
+	 * Holding it enabled here reflects how the board actually behaves while
+	 * keeping a single owner: the sensor still declares the clock in DT, so
+	 * it still gets the rate from the clock framework and still probes in
+	 * dependency order via deferred probe.
+	 */
+	/*
+	 * Force the mux to xtal (parent index 0) before using the clock.
+	 *
+	 * The bootloader leaves this field holding 16, which is not any of the
+	 * values in isp_clkc_gen_clk_table[] -- so the hardware is selecting a
+	 * source this driver does not enumerate, and the pad carries nothing
+	 * usable. isp_clkc_mux_get_parent() reports index 0 ("xtal") for any
+	 * unrecognised field value, so the clock framework's view silently
+	 * disagreed with the hardware: clk_get_rate() answered 24 MHz while the
+	 * sensor saw no clock at all and NAKed every i2c transfer.
+	 *
+	 * This cannot be expressed as assigned-clock-parents in DT, because the
+	 * only gen_clk output exposed to DT is the final gate, whose sole parent
+	 * is gen_clk_div -- reparenting *that* to xtal is rejected with -EINVAL.
+	 * Writing through the mux's own .set_parent keeps hardware and framework
+	 * state in agreement.
+	 */
+	ret = isp_clkc_mux_set_parent(&priv->gen_clk_mux.hw, 0);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "failed to select xtal for gen_clk\n");
+
+	gen_clk = devm_clk_hw_get_clk(dev, &priv->gen_clk_gate.hw, "gen_clk");
+	if (IS_ERR(gen_clk))
+		return dev_err_probe(dev, PTR_ERR(gen_clk),
+				     "failed to get gen_clk\n");
+
+	ret = clk_prepare_enable(gen_clk);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to enable gen_clk\n");
+
+	ret = devm_add_action_or_reset(dev, isp_clkc_gen_clk_disable, gen_clk);
+	if (ret)
+		return ret;
+
+	dev_info(dev, "gen_clk routed to GPIOAO_%u (mux %u -> %u), %lu Hz\n",
+		 pad_nr, pad->saved >> AO_PAD_SHIFT(pad_nr), mux,
+		 clk_get_rate(gen_clk));
+	return 0;
+}
+
 static int isp_clkc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -674,6 +836,11 @@ static int isp_clkc_probe(struct platform_device *pdev)
 	ret = devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get, onecell);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to register clk provider\n");
+
+	/* Route gen_clk out to the board's camera MCLK pad, if it has one. */
+	ret = isp_clkc_setup_gen_clk_pad(dev, priv);
+	if (ret)
+		return ret;
 
 	platform_set_drvdata(pdev, priv);
 	dev_info(dev, "registered %d aux ISP/CSI clocks via shared HHI syscon regmap\n",
