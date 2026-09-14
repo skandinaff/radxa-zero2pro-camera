@@ -66,6 +66,21 @@ struct isp_v4l2_fh {
     struct vb2_queue vb2_q;
 };
 
+/*
+ * Always take the file handle from file->private_data, never from the @fh /
+ * @priv argument of an ioctl op.
+ *
+ * In this kernel the V4L2 core passes a literal NULL for that argument: 99
+ * call sites in drivers/media/v4l2-core/v4l2-ioctl.c read
+ * "ops->vidioc_xxx(file, NULL, ...)".  Handlers that trusted the argument
+ * oopsed on the very first ioctl (VIDIOC_G_SELECTION and VIDIOC_STREAMON both
+ * did).  Returns NULL if the file has no handle, which callers must check.
+ */
+static inline struct isp_v4l2_fh *isp_v4l2_fh_of( struct file *file )
+{
+    return file->private_data ? fh_to_private( file->private_data ) : NULL;
+}
+
 static int isp_v4l2_fh_open( struct file *file )
 {
     isp_v4l2_dev_t *dev = video_drvdata( file );
@@ -200,8 +215,23 @@ static int isp_v4l2_fop_close( struct file *file )
 {
     isp_v4l2_dev_t *dev = video_drvdata( file );
     struct isp_v4l2_fh *sp = fh_to_private( file->private_data );
-    isp_v4l2_stream_t *pstream = dev->pstreams[sp->stream_id];
+    isp_v4l2_stream_t *pstream;
     int open_counter;
+
+    /* Same NULL-handle exposure as isp_v4l2_g_selection(): if the open path
+     * unwound via its vb2_q_fail label it already called
+     * isp_v4l2_fh_release(), and v4l2_fh_del() nulled file->private_data.
+     * Dereferencing sp here is what left v4l2-ctl stuck in D state after the
+     * g_selection oops. */
+    if ( !sp || !dev ) {
+        LOG( LOG_ERR, "close with sp=%p dev=%p", sp, dev );
+        return 0;
+    }
+    if ( sp->stream_id >= V4L2_STREAM_TYPE_MAX ) {
+        LOG( LOG_ERR, "close: stream_id %u out of range", sp->stream_id );
+        return 0;
+    }
+    pstream = dev->pstreams[sp->stream_id];
 
     LOG( LOG_INFO, "isp_v4l2: %s: called for sid:%d.", __func__, sp->stream_id );
 
@@ -397,9 +427,16 @@ static inline bool isp_v4l2_is_q_busy( struct vb2_queue *queue, struct file *fil
 static int isp_v4l2_streamon( struct file *file, void *priv, enum v4l2_buf_type i )
 {
     isp_v4l2_dev_t *dev = video_drvdata( file );
-    struct isp_v4l2_fh *sp = fh_to_private( priv );
-    isp_v4l2_stream_t *pstream = dev->pstreams[sp->stream_id];
+    struct isp_v4l2_fh *sp = isp_v4l2_fh_of( file );  /* @priv is always NULL */
+    isp_v4l2_stream_t *pstream;
     int rc = 0;
+
+    (void)priv;
+    if ( !sp || !dev || sp->stream_id >= V4L2_STREAM_TYPE_MAX )
+        return -ENODEV;
+    pstream = dev->pstreams[sp->stream_id];
+    if ( !pstream )
+        return -ENODEV;
 
     if ( isp_v4l2_is_q_busy( &sp->vb2_q, file ) )
         return -EBUSY;
@@ -454,9 +491,14 @@ static int isp_v4l2_streamon( struct file *file, void *priv, enum v4l2_buf_type 
 static int isp_v4l2_streamoff( struct file *file, void *priv, enum v4l2_buf_type i )
 {
     isp_v4l2_dev_t *dev = video_drvdata( file );
-    struct isp_v4l2_fh *sp = fh_to_private( priv );
-    isp_v4l2_stream_t *pstream = dev->pstreams[sp->stream_id];
+    struct isp_v4l2_fh *sp = isp_v4l2_fh_of( file );  /* @priv is always NULL */
+    isp_v4l2_stream_t *pstream;
     int rc = 0;
+
+    (void)priv;
+    if ( !sp || !dev || sp->stream_id >= V4L2_STREAM_TYPE_MAX )
+        return -ENODEV;
+    pstream = dev->pstreams[sp->stream_id];
 
     if ( isp_v4l2_is_q_busy( &sp->vb2_q, file ) )
         return -EBUSY;
@@ -599,10 +641,38 @@ static int isp_v4l2_g_selection(struct file *file, void *fh,
 {
     int ret = -1;
     isp_v4l2_dev_t *dev = video_drvdata(file);
-    struct isp_v4l2_fh *sp = fh_to_private(fh);
-    isp_v4l2_stream_t *pstream = dev->pstreams[sp->stream_id];
+    struct isp_v4l2_fh *sp;
+    isp_v4l2_stream_t *pstream;
     struct v4l2_cropcap cap;
     struct v4l2_crop crop;
+
+    /* Do NOT use the @fh argument here. Unlike most ioctl ops, the V4L2 core
+     * passes a literal NULL for the selection ops:
+     *
+     *   v4l2-ioctl.c: ret = ops->vidioc_g_selection(file, NULL, p);
+     *
+     * so @fh is always NULL, not merely sometimes. Dereferencing it oopsed on
+     * every VIDIOC_G_SELECTION. The handle comes from file->private_data,
+     * which is what every other handler in this file already does. */
+    (void)fh;
+
+    if (!file->private_data || !dev) {
+        LOG(LOG_ERR, "g_selection with private_data=%p dev=%p",
+            file->private_data, dev);
+        return -ENODEV;
+    }
+
+    sp = fh_to_private(file->private_data);
+    if (sp->stream_id >= V4L2_STREAM_TYPE_MAX) {
+        LOG(LOG_ERR, "g_selection: stream_id %u out of range", sp->stream_id);
+        return -EINVAL;
+    }
+
+    /* pstreams[] entries are cleared to NULL on close (isp_v4l2_fop_close),
+     * so a stream slot can legitimately be empty here too. */
+    pstream = dev->pstreams[sp->stream_id];
+    if (!pstream)
+        return -ENODEV;
 
     if (pstream->stream_type != V4L2_STREAM_TYPE_FR &&
                 pstream->stream_type != V4L2_STREAM_TYPE_DS1) {
@@ -636,9 +706,28 @@ static int isp_v4l2_s_selection(struct file *file, void *fh,
 {
     int ret = -1;
     isp_v4l2_dev_t *dev = video_drvdata(file);
-    struct isp_v4l2_fh *sp = fh_to_private(fh);
-    isp_v4l2_stream_t *pstream = dev->pstreams[sp->stream_id];
+    struct isp_v4l2_fh *sp;
+    isp_v4l2_stream_t *pstream;
     struct v4l2_crop crop;
+
+    /* @fh is always NULL here too -- see isp_v4l2_g_selection(). */
+    (void)fh;
+
+    if (!file->private_data || !dev) {
+        LOG(LOG_ERR, "s_selection with private_data=%p dev=%p",
+            file->private_data, dev);
+        return -ENODEV;
+    }
+
+    sp = fh_to_private(file->private_data);
+    if (sp->stream_id >= V4L2_STREAM_TYPE_MAX) {
+        LOG(LOG_ERR, "s_selection: stream_id %u out of range", sp->stream_id);
+        return -EINVAL;
+    }
+
+    pstream = dev->pstreams[sp->stream_id];
+    if (!pstream)
+        return -ENODEV;
 
     if (pstream->stream_type != V4L2_STREAM_TYPE_FR &&
                 pstream->stream_type != V4L2_STREAM_TYPE_DS1) {
@@ -662,9 +751,16 @@ static int isp_v4l2_g_pixelaspect(struct file *file, void *fh,
 {
     int ret = -1;
     isp_v4l2_dev_t *dev = video_drvdata(file);
-    struct isp_v4l2_fh *sp = fh_to_private(fh);
-    isp_v4l2_stream_t *pstream = dev->pstreams[sp->stream_id];
+    struct isp_v4l2_fh *sp = isp_v4l2_fh_of(file);  /* @fh is always NULL */
+    isp_v4l2_stream_t *pstream;
     struct v4l2_cropcap cap;
+
+    (void)fh;
+    if (!sp || !dev || sp->stream_id >= V4L2_STREAM_TYPE_MAX)
+        return -ENODEV;
+    pstream = dev->pstreams[sp->stream_id];
+    if (!pstream)
+        return -ENODEV;
 
     if (pstream->stream_type != V4L2_STREAM_TYPE_FR &&
                 pstream->stream_type != V4L2_STREAM_TYPE_DS1) {

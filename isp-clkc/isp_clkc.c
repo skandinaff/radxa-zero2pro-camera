@@ -8,11 +8,17 @@
  *   - cts_mipi_csi_phy_clk0_composite (mux -> div -> gate)
  *
  * plus four single-bit MPEG-bus gate clocks associated with the ISP/CSI2
- * block (csi_dig, mipi_isp, csi2_phy0, csi2_phy1). MIPI-DSI (display
+ * block (csi_dig, mipi_isp_pclk, csi2_phy0, csi2_phy1). MIPI-DSI (display
  * output) clocks were mainlined into drivers/clk/meson/g12a.c; MIPI-CSI
  * (camera input) clocks were not, so these simply do not exist anywhere
- * in this kernel (verified: neither dt-bindings/clock/g12a-clkc.h nor
- * /sys/kernel/debug/clk/clk_summary mention them).
+ * in this kernel.
+ *
+ * Caveat, checked against the live 6.18 board rather than assumed: of the
+ * names above only "mipi_isp" clashes, because 6.18's g12a.c has since grown
+ * an unrelated clock of that name. Ours is therefore registered as
+ * "mipi_isp_pclk"; see the comment at its registration site. The other six
+ * names were confirmed absent from /sys/kernel/debug/clk on the running
+ * kernel.
  *
  * Register layout/bitfields are taken from Amlogic's vendor out-of-tree
  * driver (github.com/khadas/linux, khadas-vims-4.9.y,
@@ -35,12 +41,15 @@
  *   0 = cts_mipi_isp_clk_composite      (mux->div->gate @ HHI_MIPI_ISP_CLK_CNTL, 0x1c0)
  *   1 = cts_mipi_csi_phy_clk0_composite (mux->div->gate @ HHI_MIPI_CSI_PHY_CLK_CNTL, 0x340)
  *   2 = csi_dig    gate (HHI_GCLK_MPEG1 bit 18)
- *   3 = mipi_isp   gate (HHI_GCLK_MPEG2 bit 17)
+ *   3 = mipi_isp_pclk gate (HHI_GCLK_MPEG2 bit 17)
  *   4 = csi2_phy0  gate (HHI_GCLK_MPEG2 bit 29)
  *   5 = csi2_phy1  gate (HHI_GCLK_MPEG2 bit 28)
  *   6 = gen_clk    composite (mux->div->gate @ HHI_GEN_CLK_CNTL, 0x228) --
- *       this is the sensor MCLK source (GPIOAO_10's "CLK12_24" alt
- *       function per the Zero 2 Pro schematic). Same missing-from-mainline
+ *       the sensor MCLK source. NOTE: on the VIM3 this reaches the camera
+ *       connector on GPIOAO_11 (mux 4, GEN_CLK_EE), NOT on GPIOAO_10 /
+ *       "CLK12_24" as on the Radxa Zero 2 Pro -- GPIOAO_10 is SPDIF_OUT on
+ *       VIM3. ao_mclk.ko is what actually programs this on the VIM3, and its
+ *       header carries the schematic evidence. Same missing-from-mainline
  *       story as 0/1: dt-bindings/clock/g12a-clkc.h and clk_summary on the
  *       live board both have zero CLKID_GEN_CLK/"gen_clk" hits, confirmed
  *       the same way as the ISP/CSI-PHY clocks were. Unlike 0/1, this
@@ -597,8 +606,18 @@ static int isp_clkc_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret, "csi_dig gate register failed\n");
 	onecell->hws[CLKID_CSI_DIG_GATE] = &priv->csi_dig_gate.hw;
 
+	/*
+	 * Named "mipi_isp_pclk", not "mipi_isp".  Linux 6.18's g12a clock
+	 * driver registers a clock called "mipi_isp" of its own (the
+	 * mipi_isp_sel/_div/mipi_isp composite, g12a.c), so claiming that name
+	 * makes clk_hw_register() return -EEXIST and takes this whole provider
+	 * down with it -- which in turn leaves ff140000.isp deferred forever.
+	 * The two are different hardware that merely share a name: mainline's
+	 * is the ISP core clock composite, this one is the MPEG-bus peripheral
+	 * gate at HHI_GCLK_MPEG2 bit 17.
+	 */
 	ret = isp_clkc_register_gate(dev, map, &priv->mipi_isp_gate,
-				      "mipi_isp", "clk81",
+				      "mipi_isp_pclk", "clk81",
 				      HHI_GCLK_MPEG2, 17,
 				      CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED);
 	if (ret)
