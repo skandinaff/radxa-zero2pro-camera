@@ -19,6 +19,7 @@
 #include <linux/device.h>
 #include <linux/kthread.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/freezer.h>
 #include <linux/random.h>
 #include <asm/div64.h>
@@ -1301,7 +1302,6 @@ int isp_v4l2_stream_enum_framesizes( isp_v4l2_stream_t *pstream, struct v4l2_frm
 int isp_v4l2_stream_enum_format( isp_v4l2_stream_t *pstream, struct v4l2_fmtdesc *f )
 {
     const isp_v4l2_fmt_t *fmt;
-    int desc_size = 0;
 
     /* check index */
     if ( f->index >= ARRAY_SIZE( isp_v4l2_supported_formats ) ) {
@@ -1313,17 +1313,11 @@ int isp_v4l2_stream_enum_format( isp_v4l2_stream_t *pstream, struct v4l2_fmtdesc
     /* get format from index */
     fmt = &isp_v4l2_supported_formats[f->index];
 
-    /* check description length */
-    if ( sizeof( fmt->name ) > sizeof( f->description ) )
-        desc_size = sizeof( f->description );
-    else
-        desc_size = sizeof( fmt->name );
-
     /* reset flag */
     f->flags = 0;
 
     /* copy description */
-    strlcpy( f->description, fmt->name, desc_size );
+    strscpy( f->description, fmt->name, sizeof(f->description) );
 
     /* copy format code */
     f->pixelformat = fmt->fourcc;

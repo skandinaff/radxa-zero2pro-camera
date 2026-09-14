@@ -62,9 +62,8 @@ static int isp_vb2_queue_setup( struct vb2_queue *vq, const struct v4l2_format *
              fmt, fmt->fmt.pix.width, fmt->fmt.pix.height, fmt->fmt.pix.sizeimage );
 #endif
 
-    LOG( LOG_INFO, "vq->num_buffers: %u vq->type:%u.", vq->num_buffers, vq->type );
-    if ( vq->num_buffers + *nbuffers < 3 )
-        *nbuffers = 3 - vq->num_buffers;
+    LOG( LOG_INFO, "vq buffers: %u vq->type:%u.",
+         vb2_get_num_buffers(vq), vq->type );
 
     if ( vfmt.type == V4L2_BUF_TYPE_VIDEO_CAPTURE ) {
         *nplanes = 1;
@@ -309,7 +308,10 @@ int isp_vb2_queue_init( struct vb2_queue *q, struct mutex *mlock, isp_v4l2_strea
 
     q->ops = &isp_vb2_ops;
     q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
-    q->min_buffers_needed = 3;
+    /* min_buffers_needed was renamed in videobuf2.  Keep the hardware
+     * requirement: streaming starts only after three capture buffers have
+     * been queued.  vb2 also derives a suitable minimum allocation count. */
+    q->min_queued_buffers = 3;
     q->lock = mlock;
 
     return vb2_queue_init( q );

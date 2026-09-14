@@ -19,6 +19,7 @@
 
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/mutex.h>
 #include <linux/videodev2.h>
 #include <media/videobuf2-core.h>
@@ -100,7 +101,7 @@ static int isp_v4l2_fh_open( struct file *file )
     mutex_unlock( &dev->file_lock );
 
     v4l2_fh_init( &sp->fh, &dev->video_dev );
-    v4l2_fh_add( &sp->fh );
+    v4l2_fh_add( &sp->fh, file );
 
     return 0;
 }
@@ -110,7 +111,7 @@ static int isp_v4l2_fh_release( struct file *file )
     struct isp_v4l2_fh *sp = fh_to_private( file->private_data );
 
     if ( sp ) {
-        v4l2_fh_del( &sp->fh );
+        v4l2_fh_del( &sp->fh, file );
         v4l2_fh_exit( &sp->fh );
     }
     /* 4.9->6.1 port: kzfree() -> kfree_sensitive(). */
@@ -479,7 +480,7 @@ static int isp_v4l2_enum_input( struct file *file, void *fh, struct v4l2_input *
     if ( input->index > 0 )
         return -EINVAL;
 
-    strlcpy( input->name, "camera", sizeof( input->name ) );
+    strscpy( input->name, "camera", sizeof( input->name ) );
     input->type = V4L2_INPUT_TYPE_CAMERA;
 
     return 0;
@@ -854,7 +855,7 @@ int isp_v4l2_create_instance( struct v4l2_device *v4l2_dev, struct platform_devi
 
     /* finally start creating the device nodes */
     vfd = &dev->video_dev;
-    strlcpy( vfd->name, "isp_v4l2-vid-cap", sizeof( vfd->name ) );
+    strscpy( vfd->name, "isp_v4l2-vid-cap", sizeof( vfd->name ) );
     vfd->fops = &isp_v4l2_fops;
     vfd->ioctl_ops = &isp_v4l2_ioctl_ops;
     vfd->release = video_device_release_empty;

@@ -13,9 +13,19 @@ if [ ! -d "$KDIR" ]; then
 	exit 1
 fi
 
+make_args="KDIR=$KDIR"
+# Keep the default native build path for the VIM3, while allowing an ARM64
+# out-of-tree kernel build to supply the target architecture and toolchain.
+[ -n "${ARCH:-}" ] && make_args="$make_args ARCH=$ARCH"
+[ -n "${CROSS_COMPILE:-}" ] && make_args="$make_args CROSS_COMPILE=$CROSS_COMPILE"
+[ -n "${CC:-}" ] && make_args="$make_args CC=$CC"
+
 for d in dtbo-loader isp-clkc ao-mclk imx415 isp-module; do
 	printf '=== %s ===\n' "$d"
-	make -C "$ROOT/$d" KDIR="$KDIR"
+	# Deliberate word splitting: make_args contains only assignment words
+	# constructed above, never user-supplied shell syntax.
+	# shellcheck disable=SC2086
+	make -C "$ROOT/$d" $make_args
 done
 
 printf '=== overlays ===\n'

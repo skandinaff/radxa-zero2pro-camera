@@ -40,7 +40,12 @@ static int __init dtbo_loader_init(void)
 	}
 	size = ret;
 
-	ret = of_overlay_fdt_apply(buf, size, &ovcs_id);
+	/*
+	 * Linux 6.18 added target_base, allowing an overlay to be applied below
+	 * a specific DT node.  NULL retains the historic root-of-live-tree
+	 * behaviour required by these VIM3 overlays.
+	 */
+	ret = of_overlay_fdt_apply(buf, size, &ovcs_id, NULL);
 	vfree(buf);
 
 	if (ret) {

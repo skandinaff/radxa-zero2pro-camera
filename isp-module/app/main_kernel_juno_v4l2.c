@@ -44,7 +44,7 @@
 #include "system_am_mipi.h"
 #include <linux/fs.h>
 #include <asm/uaccess.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/delay.h>
 #include "v4l2_interface/isp-v4l2.h"
 
@@ -166,10 +166,10 @@ int acamera_camera_v4l2_get_index_by_name( const char *name )
 
 static int acamera_camera_async_bound( struct v4l2_async_notifier *notifier,
                                        struct v4l2_subdev *sd,
-                                       struct v4l2_async_subdev *asd )
+                                       struct v4l2_async_connection *asc )
 {
     int rc = 0;
-    LOG( LOG_ERR, "bound called with sd 0x%x, asd 0x%x, sd->dev 0x%x, name %s", sd, asd, sd->dev, sd->name );
+    LOG( LOG_ERR, "bound called with sd 0x%x, asc 0x%x, sd->dev 0x%x, name %s", sd, asc, sd->dev, sd->name );
     int idx = 0;
     for ( idx = 0; idx < V4L2_SOC_SUBDEV_NUMBER; idx++ ) {
         if ( g_subdevs.soc_subdevs[idx] == 0 ) {
@@ -197,9 +197,9 @@ static int acamera_camera_async_bound( struct v4l2_async_notifier *notifier,
 
 static void acamera_camera_async_unbind( struct v4l2_async_notifier *notifier,
                                          struct v4l2_subdev *sd,
-                                         struct v4l2_async_subdev *asd )
+                                         struct v4l2_async_connection *asc )
 {
-    LOG( LOG_ERR, "unbind called for subdevice sd 0x%x, asd 0x%x, sd->dev 0x%x, name %s", sd, asd, sd->dev, sd->name );
+    LOG( LOG_ERR, "unbind called for subdevice sd 0x%x, asc 0x%x, sd->dev 0x%x, name %s", sd, asc, sd->dev, sd->name );
 
     int idx = acamera_camera_v4l2_get_index_by_name( sd->name );
 
@@ -717,7 +717,7 @@ static int32_t isp_platform_probe( struct platform_device *pdev )
             LOG( LOG_ERR, "am_mipi_parse_dt failed; CSI receive path will be down\n" );
     }
 
-    dev_info.clk_isp_0 = devm_clk_get(&pdev->dev, "cts_mipi_isp_clk_composite");
+	dev_info.clk_isp_0 = devm_clk_get(&pdev->dev, "cts_mipi_isp_clk");
     if (IS_ERR(dev_info.clk_isp_0)) {
         LOG(LOG_ERR, "cannot get clock\n");
         dev_info.clk_isp_0 = NULL;
@@ -730,7 +730,7 @@ static int32_t isp_platform_probe( struct platform_device *pdev )
     isp_clk_rate = clk_get_rate(dev_info.clk_isp_0);
     LOG(LOG_ERR, "isp init clock is %d MHZ\n", isp_clk_rate / 1000000);
 
-    dev_info.clk_mipi_0 = devm_clk_get(&pdev->dev, "cts_mipi_csi_phy_clk0_composite");
+	dev_info.clk_mipi_0 = devm_clk_get(&pdev->dev, "cts_mipi_csi_phy_clk0");
     if (IS_ERR(dev_info.clk_mipi_0)) {
         LOG(LOG_ERR, "cannot get clock\n");
         dev_info.clk_mipi_0 = NULL;
@@ -777,7 +777,7 @@ static int32_t isp_platform_probe( struct platform_device *pdev )
     /* v4l2_async_nf_init() must run before any v4l2_async_nf_add_*()
      * call -- it initializes notifier->asd_list, which the add helpers
      * below link into. */
-    v4l2_async_nf_init( &g_subdevs.notifier );
+    v4l2_async_nf_init( &g_subdevs.notifier, &v4l2_dev );
     g_subdevs.notifier.ops = &acamera_notifier_ops;
 
     idx = 0;
@@ -804,7 +804,7 @@ static int32_t isp_platform_probe( struct platform_device *pdev )
      * binding to anything, which is a safe (if inert) state. */
     while ( idx < V4L2_SOC_SUBDEV_NUMBER ) {
         struct fwnode_handle *remote;
-        struct v4l2_async_subdev *asd;
+        struct v4l2_async_connection *asc;
 
         ep = fwnode_graph_get_next_endpoint( dev_fwnode( &pdev->dev ), ep );
         if ( !ep )
@@ -816,10 +816,11 @@ static int32_t isp_platform_probe( struct platform_device *pdev )
             continue;
         }
 
-        asd = v4l2_async_nf_add_fwnode( &g_subdevs.notifier, remote, struct v4l2_async_subdev );
+        asc = v4l2_async_nf_add_fwnode( &g_subdevs.notifier, remote,
+                                        struct v4l2_async_connection );
         fwnode_handle_put( remote );
-        if ( IS_ERR( asd ) ) {
-            LOG( LOG_ERR, "failed to add fwnode async subdev: %ld", PTR_ERR( asd ) );
+        if ( IS_ERR( asc ) ) {
+            LOG( LOG_ERR, "failed to add fwnode async subdev: %ld", PTR_ERR( asc ) );
             fwnode_handle_put( ep );
             break;
         }
@@ -829,7 +830,7 @@ static int32_t isp_platform_probe( struct platform_device *pdev )
     if ( ep )
         fwnode_handle_put( ep );
 
-    rc = v4l2_async_nf_register( &v4l2_dev, &g_subdevs.notifier );
+    rc = v4l2_async_nf_register( &g_subdevs.notifier );
 
     device_create_file(&pdev->dev, &dev_attr_reg);
     device_create_file(&pdev->dev, &dev_attr_dump_frame);
@@ -856,7 +857,7 @@ free_res:
 }
 
 
-static int isp_platform_remove(struct platform_device *pdev)
+static void isp_platform_remove(struct platform_device *pdev)
 {
     device_remove_file(&pdev->dev, &dev_attr_reg);
     device_remove_file(&pdev->dev, &dev_attr_dump_frame);
@@ -899,7 +900,6 @@ static int isp_platform_remove(struct platform_device *pdev)
     close_hw_io();
 
     LOG(LOG_ERR, "Isp remove\n");
-    return 0;
 }
 
 static const struct of_device_id isp_dt_match[] = {

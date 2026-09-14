@@ -149,16 +149,12 @@ static void *vb2_cmalloc_get_userptr(struct vb2_buffer *vb, struct device *dev,
 	buf->dma_dir = vb->vb2_queue->dma_dir;
 	offset = vaddr & ~PAGE_MASK;
 	buf->size = size;
-	/* 4.9->6.1 port: vb2_create_framevec() dropped its 3rd `write`
-	 * argument entirely (used to select FOLL_WRITE when pinning user
-	 * pages for a DMA_FROM_DEVICE buffer). No replacement parameter
-	 * exists in 6.1's signature -- checked videobuf2-memops.h, it's
-	 * just (start, length) now. Not verified what write-access policy
-	 * the new implementation defaults to internally; flagging rather
-	 * than guessing. Low risk in practice (USERPTR path, not used by
-	 * this driver's own MMAP-based buffer flow), but worth a second
-	 * look if USERPTR-type buffers are ever exercised on this driver. */
-	vec = vb2_create_framevec(vaddr, size);
+	/* Linux 6.18 restored the explicit FOLL_WRITE selection.  The device
+	 * writes capture data into USERPTR pages for DMA_FROM_DEVICE (and
+	 * bidirectional) queues, matching the in-tree vb2 allocators. */
+	vec = vb2_create_framevec(vaddr, size,
+				 buf->dma_dir == DMA_FROM_DEVICE ||
+				 buf->dma_dir == DMA_BIDIRECTIONAL);
 	if (IS_ERR(vec)) {
 		ret = PTR_ERR(vec);
 		goto fail_pfnvec_create;
@@ -315,7 +311,7 @@ static int vb2_cmalloc_mmap(void *buf_priv, struct vm_area_struct *vma)
 		/*
 		* Make sure that vm_areas for 2 buffers won't be merged together
 		*/
-	vma->vm_flags |= VM_DONTEXPAND;
+	vm_flags_set(vma, VM_DONTEXPAND);
 
 		/*
 		* Use common vm_area operations to track buffer refcount.
@@ -400,16 +396,14 @@ static struct sg_table *vb2_cmalloc_dmabuf_ops_map(
 	struct dma_buf_attachment *db_attach, enum dma_data_direction dma_dir)
 {
 	struct vb2_cmalloc_attachment *attach = db_attach->priv;
-	/* stealing dmabuf mutex to serialize map/unmap operations */
-	struct mutex *lock = &db_attach->dmabuf->lock;
 	struct sg_table *sgt;
 
-	mutex_lock(lock);
+	/* map_dma_buf() is invoked with the dma-buf reservation lock held on
+	 * Linux 6.18, so the attachment cache is already serialized. */
 
 	sgt = &attach->sgt;
 	/* return previously mapped sg table */
 	if (attach->dma_dir == dma_dir) {
-		mutex_unlock(lock);
 		return sgt;
 	}
 
@@ -425,13 +419,10 @@ static struct sg_table *vb2_cmalloc_dmabuf_ops_map(
 				dma_dir);
 	if (!sgt->nents) {
 		pr_err("failed to map scatterlist\n");
-		mutex_unlock(lock);
 		return ERR_PTR(-EIO);
 	}
 
 	attach->dma_dir = dma_dir;
-
-	mutex_unlock(lock);
 
 	return sgt;
 }
@@ -545,4 +536,4 @@ MODULE_LICENSE("GPL");
  * somewhere in this span; modpost now errors "uses symbol dma_buf_export
  * from namespace DMA_BUF, but does not import it" without this. Confirmed
  * via a real `make modules` run against the target headers, not a guess. */
-MODULE_IMPORT_NS(DMA_BUF);
+MODULE_IMPORT_NS("DMA_BUF");
