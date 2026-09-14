@@ -327,15 +327,16 @@ int fw_intf_stream_start( isp_v4l2_stream_type_t streamType )
      * of the upstream Khadas condition (common_drivers khadas-vims-5.15.y,
      * drivers/armisp-g12b/.../fw-interface.c, fw_intf_stream_start():
      * "streamType == V4L2_STREAM_TYPE_FR || streamType == V4L2_STREAM_TYPE_DS1").
-     * The two paths share one sensor; DS1 differs from FR only in that the ISP
-     * scales the output on the way to a different DMA writer, so starting DS1
-     * must turn the sensor on exactly as FR does.
+     * The two paths share one sensor;
+     * DS1 differs from FR only in that the ISP scales the output on the way to
+     * a different DMA writer. Starting DS1 therefore has to turn the sensor on
+     * exactly as FR does.
      *
-     * The omission failed quietly: VIDIOC_STREAMON on the DS1 stream returned
-     * 0 and its stream thread started, but the sensor was never told to
-     * stream, so no frame ever completed and userspace blocked forever in
-     * VIDIOC_DQBUF. Only the start side was asymmetric -- fw_intf_stream_stop()
-     * kept its DS1 branch.
+     * The symptom of the omission was quiet: VIDIOC_STREAMON on the DS1 stream
+     * returned 0 and the stream thread started, but the sensor was never told
+     * to stream, so no frame ever completed and userspace blocked forever in
+     * VIDIOC_DQBUF. Note fw_intf_stream_stop() kept its DS1 branch, so only
+     * the start side was asymmetric.
      */
     if (streamType == V4L2_STREAM_TYPE_FR || streamType == V4L2_STREAM_TYPE_DS1) {
         if (streamType == V4L2_STREAM_TYPE_FR) {
@@ -345,10 +346,11 @@ int fw_intf_stream_start( isp_v4l2_stream_type_t streamType )
              * this a second STREAMON in the same load starts the sensor into a
              * deaf ISP.
              *
-             * This rearm is ours, not upstream's -- the reference does nothing
-             * here but SENSOR_STREAMING ON -- so keep it scoped to FR.
-             * Applying it on the DS1 path too hard-hung the board on the first
-             * DS1 STREAMON (watchdog reset, nothing recorded in pstore). */
+             * This rearm is ours, not upstream's: the reference does nothing
+             * here but SENSOR_STREAMING ON. Keep it scoped to FR. Applying it
+             * on the DS1 path as well hard-hung the board on the first DS1
+             * STREAMON (watchdog reset, no panic recorded in pstore), so DS1
+             * follows the reference exactly. */
             acamera_fw_stream_rearm();
             fr_stream_active = 1;
         }
@@ -585,6 +587,44 @@ int fw_intf_stream_set_resolution( const isp_v4l2_sensor_info *sensor_info,
         } else {
             acamera_command( TSENSOR, SENSOR_PRESET, 0, COMMAND_GET, &idx );
             LOG( LOG_CRIT, "Leaving same sensor settings resolution : width = %d, height = %d (preset idx = %d)", w, h, idx );
+        }
+
+        /*
+         * Report back the resolution the sensor actually ended up at.
+         *
+         * FR has no downscaler (see the comment at the top of this function):
+         * the only thing this branch can do about a size request is pick a
+         * sensor preset. fw_intf_find_proper_present_idx() matches presets on
+         * an exact width/height, and returns 0 -- the default, full-resolution
+         * preset -- for anything it cannot match, so an unsupported request
+         * silently leaves the sensor where it was.
+         *
+         * Without this write-back the caller kept the *requested* size, and
+         * everything downstream inherited that lie: isp_v4l2_stream_set_format()
+         * stored it in cur_v4l2_fmt, VIDIOC_G_FMT reported it, and vb2 sized its
+         * buffers from it -- while the ISP kept writing full-resolution frames.
+         * The DMA writer then refused every buffer ("frame_size greater than
+         * available buffer", e.g. 8697856 vs 2076672) and userspace got
+         * unwritten memory that looked like a corrupt image.
+         *
+         * V4L2 explicitly allows a driver to adjust the format in S_FMT, so
+         * answering with the achievable size is both legal and far more useful
+         * than accepting a size we cannot produce. Note this must NOT be
+         * "fixed" by enlarging the buffer instead: that would keep the ISP
+         * writing full-res frames while claiming to deliver a smaller one.
+         *
+         * Genuine downscaled output comes from the DS1 stream, which is the
+         * path that drives the IMAGE_RESIZE commands and the SCALER resize
+         * type below.
+         */
+        acamera_command( TSENSOR, SENSOR_WIDTH, 0, COMMAND_GET, &width_cur );
+        acamera_command( TSENSOR, SENSOR_HEIGHT, 0, COMMAND_GET, &height_cur );
+        if ( width_cur != *width || height_cur != *height ) {
+            LOG( LOG_CRIT,
+                 "FR has no downscaler: requested %ux%u, sensor delivers %ux%u -- reporting %ux%u",
+                 *width, *height, width_cur, height_cur, width_cur, height_cur );
+            *width = width_cur;
+            *height = height_cur;
         }
 #endif
     }

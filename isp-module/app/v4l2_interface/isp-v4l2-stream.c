@@ -1485,11 +1485,33 @@ int isp_v4l2_stream_set_format( isp_v4l2_stream_t *pstream, struct v4l2_format *
     }
 
     /* update resolution */
-    rc = fw_intf_stream_set_resolution( &pstream->stream_common->sensor_info,
-                                        pstream->stream_type, &( f->fmt.pix_mp.width ), &( f->fmt.pix_mp.height ) );
-    if ( rc < 0 ) {
-        LOG( LOG_CRIT, "set resolution failed ! (rc = %d)", rc );
-        return rc;
+    {
+        uint32_t req_w = f->fmt.pix_mp.width;
+        uint32_t req_h = f->fmt.pix_mp.height;
+
+        rc = fw_intf_stream_set_resolution( &pstream->stream_common->sensor_info,
+                                            pstream->stream_type, &( f->fmt.pix_mp.width ), &( f->fmt.pix_mp.height ) );
+        if ( rc < 0 ) {
+            LOG( LOG_CRIT, "set resolution failed ! (rc = %d)", rc );
+            return rc;
+        }
+
+        /*
+         * fw_intf_stream_set_resolution() may answer with a different size
+         * than was asked for -- the FR path has no downscaler, so it can only
+         * pick a sensor preset and reports back what the sensor actually
+         * delivers. try_format() above computed bytesperline/sizeimage from
+         * the *requested* size, so those are now stale: re-derive them from
+         * the size we actually got, or vb2 would allocate buffers for a frame
+         * the ISP is not producing.
+         */
+        if ( f->fmt.pix_mp.width != req_w || f->fmt.pix_mp.height != req_h ) {
+            LOG( LOG_CRIT,
+                 "[Stream#%d] resolution adjusted %ux%u -> %ux%u, recomputing plane sizes",
+                 pstream->stream_id, req_w, req_h,
+                 f->fmt.pix_mp.width, f->fmt.pix_mp.height );
+            isp_v4l2_stream_try_format( pstream, f );
+        }
     }
 
     LOG( LOG_INFO, "[Stream#%d] Current preset:%d Exposures for this settings %d",
