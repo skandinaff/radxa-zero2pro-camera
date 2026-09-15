@@ -67,27 +67,6 @@ static uint32_t isp_stream_on_mask = 0;
 
 #define ISP_STREAM_BIT( t ) ( 1u << (unsigned int)( t ) )
 
-/*
- * Whether acamera_fw_stream_rearm() runs for the first stream of any type
- * (true) or only for FR (false).
- *
- * This exists because the two settings have very different blast radii while
- * DS1 is still being brought up. With it false a DS1-only stream leaves the
- * ISP masked and in SAFE_STOP: no frame-done interrupt ever fires, DQBUF times
- * out after five seconds, and the board stays up -- which makes it safe to arm
- * the DS1 pipe and then read the programmed geometry back. With it true the
- * ISP actually processes frames, and any remaining geometry error is written
- * into kernel memory by the DMA engine, which takes the board down hard with
- * no recoverable log.
- *
- * Default false so that a mistake costs a timeout rather than a reset. Flip it
- * deliberately, with a UART capture already running.
- */
-static bool stream_rearm_any = false;
-module_param( stream_rearm_any, bool, 0644 );
-MODULE_PARM_DESC( stream_rearm_any,
-                  "Re-arm the ISP for the first stream of any type, not just FR (default: FR only)" );
-
 /* Defined in src/fw_lib/acamera_fw.c. Declared here rather than by including
  * acamera_fw.h, which pulls in the whole FSM manager, matching how this file
  * already reaches main_firmware.c above. */
@@ -391,9 +370,18 @@ int fw_intf_stream_start( isp_v4l2_stream_type_t streamType )
          * ever fires and userspace times out in DQBUF.
          *
          * Since rearm is ISP-block-wide, it belongs to whichever stream starts
-         * first, not to FR specifically. */
-        if ( !isp_stream_on_mask &&
-             ( stream_rearm_any || streamType == V4L2_STREAM_TYPE_FR ) )
+         * first, not to FR specifically. It used to sit behind a
+         * stream_rearm_any module parameter defaulting to FR-only, which made
+         * exactly this failure the default: fw_intf_stream_stop() calls
+         * acamera_fw_stream_quiesce() for the last stream of *any* type, so a
+         * DS1 stream would mask the ISP and leave the input port in SAFE_STOP
+         * on the way out and then never undo it on the way back in. Measured:
+         * the first DS1 capture after a module load worked (acamera_fw_init()
+         * had left the block armed) and every one after it returned zero
+         * frames, while FR -- which always rearmed -- restarted indefinitely.
+         * Rearm and quiesce have to be gated the same way or they do not pair.
+         */
+        if ( !isp_stream_on_mask )
             acamera_fw_stream_rearm();
         isp_stream_on_mask |= ISP_STREAM_BIT( streamType );
 
