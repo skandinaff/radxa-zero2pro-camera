@@ -24,7 +24,6 @@
 #include "dma_writer.h"
 #include "acamera_firmware_config.h"
 #include "acamera.h"
-#include <linux/moduleparam.h>
 
 #ifdef LOG_MODULE
 #undef LOG_MODULE
@@ -38,18 +37,6 @@
 
 static dma_handle s_handle[FIRMWARE_CONTEXT_NUMBER];
 static int32_t ctx_pos = 0;
-
-/* Bring-up diagnostic: exercise DS1 STREAMON/config propagation with valid
- * buffers but no writes to them. Load-time only so it cannot release a writer
- * while a diagnostic capture is in progress. Default behavior is unchanged. */
-static bool ds1_dma_hold;
-module_param( ds1_dma_hold, bool, 0444 );
-MODULE_PARM_DESC( ds1_dma_hold, "Keep both DS1 DMA writers disabled for startup diagnostics" );
-
-static uint8_t dma_writer_enable_value( const dma_pipe *pipe )
-{
-    return !( ds1_dma_hold && pipe->type == dma_ds1 );
-}
 
 dma_error dma_writer_create( void **handle )
 {
@@ -262,12 +249,6 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
     if ( frame_buf_len == 0 )
         return 0;
 
-    LOG( LOG_CRIT, "TRACE wfq: type=%d len=%u enabled=%u init=%u %ux%u stride=%u bufsz=%u",
-         (int)type, (unsigned int)frame_buf_len, (unsigned int)pipe->settings.enabled,
-         (unsigned int)pipe->state.initialized,
-         (unsigned int)pipe->settings.width, (unsigned int)pipe->settings.height,
-         (unsigned int)frame_buf_array[0].primary.line_offset,
-         (unsigned int)frame_buf_array[0].primary.size );
 
     int index = 0;
     for ( i = 0; i < MAX_DMA_QUEUE_FRAMES; i++ ) {
@@ -317,7 +298,7 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
          * here rejected the FR pipe outright, which is how this was caught. */
         uint32_t arm_size_uv = ( fmt_uv != DMA_FORMAT_DISABLE ) ? arm_stride_uv * ( pipe->settings.height / 2 ) : 0;
 
-        LOG( LOG_CRIT, "TRACE dma arm: pipe=%d %ux%u stride=%u need=%u have=%u | uv fmt=%u stride=%u need=%u have=%u",
+        LOG( LOG_INFO, "dma arm: pipe=%d %ux%u stride=%u need=%u have=%u | uv fmt=%u stride=%u need=%u have=%u",
              (int)pipe->type, (unsigned int)pipe->settings.width, (unsigned int)pipe->settings.height,
              arm_stride, arm_size, (unsigned int)arm_frame->primary.size,
              (unsigned int)fmt_uv, arm_stride_uv, arm_size_uv, (unsigned int)arm_frame->secondary.size );
@@ -341,7 +322,7 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
         pipe->settings.frame_buf_queue[set_i].primary.status = dma_buf_busy;
         pipe->settings.enabled = 1;
         if ( pipe->api.p_acamera_isp_dma_writer_format_read( pipe->settings.isp_base ) != DMA_FORMAT_DISABLE )
-            pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, dma_writer_enable_value( pipe ) );
+            pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, 1 );
         else
             pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, 0 );
 
@@ -354,7 +335,7 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
         //check if format is for UV
         if ( pipe->api.p_acamera_isp_dma_writer_format_read_uv( pipe->settings.isp_base ) != DMA_FORMAT_DISABLE ) {
             pipe->settings.frame_buf_queue[set_i].secondary.status = dma_buf_busy;
-            pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base, dma_writer_enable_value( pipe ) );
+            pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base, 1 );
             pipe->api.p_acamera_isp_dma_writer_line_offset_write_uv( pipe->settings.isp_base, pipe->settings.frame_buf_queue[set_i].secondary.line_offset );
             LOG( LOG_DEBUG, "enabled uv %d", pipe->api.p_acamera_isp_dma_writer_format_read_uv( pipe->settings.isp_base ) );
         } else {
@@ -363,23 +344,6 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
             LOG( LOG_DEBUG, "cannot enable uv %d", pipe->api.p_acamera_isp_dma_writer_format_read_uv( pipe->settings.isp_base ) );
         }
 
-        /* Read the geometry back out of the config page after arming. These
-         * accessors are system_sw_*, i.e. they touch the shadow the ISP only
-         * picks up at the next frame start -- so this says what the hardware is
-         * about to be told, not what it currently holds, and a disagreement
-         * with the values above means the write did not land where intended. */
-        LOG( LOG_CRIT, "TRACE dma armed readback: pipe=%d fmt=%u %ux%u | uv fmt=%u %ux%u",
-             (int)pipe->type,
-             (unsigned int)pipe->api.p_acamera_isp_dma_writer_format_read( pipe->settings.isp_base ),
-             (unsigned int)pipe->api.p_acamera_isp_dma_writer_active_width_read( pipe->settings.isp_base ),
-             (unsigned int)pipe->api.p_acamera_isp_dma_writer_active_height_read( pipe->settings.isp_base ),
-             (unsigned int)pipe->api.p_acamera_isp_dma_writer_format_read_uv( pipe->settings.isp_base ),
-             (unsigned int)pipe->api.p_acamera_isp_dma_writer_active_width_read_uv( pipe->settings.isp_base ),
-             (unsigned int)pipe->api.p_acamera_isp_dma_writer_active_height_read_uv( pipe->settings.isp_base ) );
-        if ( !dma_writer_enable_value( pipe ) )
-            LOG( LOG_CRIT, "TRACE DS1 DMA HELD: Y address=0x%08x UV address=0x%08x; both writer enables remain zero",
-                 (unsigned int)arm_frame->primary.address,
-                 (unsigned int)arm_frame->secondary.address );
     }
     return i;
 }
@@ -511,9 +475,6 @@ dma_error dma_writer_pipe_update( dma_pipe *pipe , bool drop_frame)
                     empty_frame->primary.height = pipe->api.p_acamera_isp_dma_writer_active_height_read( pipe->settings.isp_base );
                     empty_frame->primary.line_offset = acamera_line_offset( empty_frame->primary.width, _get_pixel_width( empty_frame->primary.type ) );
                     uint32_t frame_size = empty_frame->primary.line_offset * empty_frame->primary.height;
-                    LOG( LOG_CRIT, "TRACE dma_writer: active %ux%u type=%u line_offset=%u frame_size=%u buf_size=%u",
-                        empty_frame->primary.width, empty_frame->primary.height, empty_frame->primary.type,
-                        empty_frame->primary.line_offset, frame_size, empty_frame->primary.size );
                     addr = empty_frame->primary.address;
                     pipe->settings.inqueue_tframe[1] = empty_frame;
                     LOG( LOG_DEBUG, "next dma addr:0x%lx\n", addr );
@@ -537,7 +498,7 @@ dma_error dma_writer_pipe_update( dma_pipe *pipe , bool drop_frame)
                         pipe->api.p_acamera_isp_dma_writer_bank0_base_write( pipe->settings.isp_base, addr );
                         empty_frame->primary.status = dma_buf_busy;
                         pipe->settings.last_address = addr;
-                        pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, dma_writer_enable_value( pipe ) );
+                        pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, 1 );
                         /*if ( pipe->settings.enabled == 0 ) {
 							pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, 1 );
 							pipe->settings.enabled = 1;
@@ -571,7 +532,7 @@ dma_error dma_writer_pipe_update( dma_pipe *pipe , bool drop_frame)
                         pipe->api.p_acamera_isp_dma_writer_bank0_base_write_uv( pipe->settings.isp_base, addr );
                         empty_frame->secondary.status = dma_buf_busy;
                         pipe->settings.last_address = addr;
-                        pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base, dma_writer_enable_value( pipe ) );
+                        pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base, 1 );
                         /*if ( pipe->settings.enabled == 0 ) {
 							pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base,  1 );
 							//pipe->settings.enabled = 1;

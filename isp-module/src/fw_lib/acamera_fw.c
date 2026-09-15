@@ -613,7 +613,7 @@ int32_t acamera_init_context_seq( acamera_context_t *p_ctx )
     acamera_load_sw_sequence( p_ctx->settings.isp_base, p_ctx->isp_context_seq.sequence, p_ctx->isp_context_seq.seq_num );
 #if ISP_HAS_TEMPER
     acamera_isp_top_bypass_temper_write( p_ctx->settings.isp_base, temper_bypass );
-    LOG( LOG_CRIT, "TRACE context: preserved sensor Temper bypass=%u", (unsigned int)temper_bypass );
+    LOG( LOG_INFO, "context: preserved sensor Temper bypass=%u", (unsigned int)temper_bypass );
 #endif
 
     /*

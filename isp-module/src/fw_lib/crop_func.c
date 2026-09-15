@@ -170,7 +170,7 @@ void _update_ds( crop_fsm_ptr_t p_fsm, int isr )
      * SYSTEM_LOG_LEVEL so it never reaches the log. The !isr guard keeps it to
      * configuration changes rather than every frame. */
     if ( !isr )
-        LOG( LOG_CRIT, "TRACE DS update: Crop: e %d x %d, y %d, w %d, h %d, Downscaler: e %d, w %d, h %d -> ds %dx%d", p_fsm->crop_ds.enable, p_fsm->crop_ds.xoffset, p_fsm->crop_ds.yoffset, p_fsm->crop_ds.xsize, p_fsm->crop_ds.ysize, p_fsm->scaler_ds.enable, p_fsm->scaler_ds.xsize, p_fsm->scaler_ds.ysize, p_fsm->width_ds, p_fsm->height_ds );
+        LOG( LOG_NOTICE, "DS update: Crop: e %d x %d, y %d, w %d, h %d, Downscaler: e %d, w %d, h %d -> ds %dx%d", p_fsm->crop_ds.enable, p_fsm->crop_ds.xoffset, p_fsm->crop_ds.yoffset, p_fsm->crop_ds.xsize, p_fsm->crop_ds.ysize, p_fsm->scaler_ds.enable, p_fsm->scaler_ds.xsize, p_fsm->scaler_ds.ysize, p_fsm->width_ds, p_fsm->height_ds );
     LOG( LOG_INFO, "DS info: Crop: e %d x %d, y %d, w %d, h %d, Downscaler: e %d, w %d, h %d", p_fsm->crop_ds.enable, p_fsm->crop_ds.xoffset, p_fsm->crop_ds.yoffset, p_fsm->crop_ds.xsize, p_fsm->crop_ds.ysize, p_fsm->scaler_ds.enable, p_fsm->scaler_ds.xsize, p_fsm->scaler_ds.ysize );
 }
 #endif //ISP_HAS_DS1

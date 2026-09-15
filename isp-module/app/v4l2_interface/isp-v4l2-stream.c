@@ -1168,13 +1168,11 @@ int isp_v4l2_stream_on( isp_v4l2_stream_t *pstream )
         pstream->fw_frame_seq_count = 0;
 
         /* launch copy thread */
-        LOG( LOG_CRIT, "TRACE stream_on: [Stream#%d] about to kthread_run copy thread", pstream->stream_id );
         pstream->kthread_stream = kthread_run( isp_v4l2_stream_copy_thread, pstream, "isp-stream-%d", pstream->stream_id );
         if ( IS_ERR( pstream->kthread_stream ) ) {
             LOG( LOG_ERR, "[Stream#%d] create kernel_thread() failed", pstream->stream_id );
             return PTR_ERR( pstream->kthread_stream );
         }
-        LOG( LOG_CRIT, "TRACE stream_on: [Stream#%d] stream_thread pid: %u", pstream->stream_id, pstream->kthread_stream->pid );
 
     }
 #if ISP_HAS_META_CB
@@ -1184,10 +1182,8 @@ int isp_v4l2_stream_on( isp_v4l2_stream_t *pstream )
 #endif
 
     /* hardware stream on */
-    LOG( LOG_CRIT, "TRACE stream_on: [Stream#%d] about to call fw_intf_stream_start", pstream->stream_id );
     if ( fw_intf_stream_start( pstream->stream_type ) < 0 )
         return -1;
-    LOG( LOG_CRIT, "TRACE stream_on: [Stream#%d] fw_intf_stream_start returned", pstream->stream_id );
 
     /* control fields update */
     pstream->stream_started = 1;

@@ -465,18 +465,14 @@ static int isp_v4l2_streamon( struct file *file, void *priv, enum v4l2_buf_type 
         return -EINVAL;
     }
 
-    LOG( LOG_CRIT, "TRACE streamon: about to call vb2_streamon" );
     rc = vb2_streamon( &sp->vb2_q, i );
-    LOG( LOG_CRIT, "TRACE streamon: vb2_streamon returned rc = %d", rc );
     if ( rc != 0 ) {
         LOG( LOG_ERR, "fail to vb2_streamon. (rc=%d)", rc );
         return rc;
     }
 
     /* Start hardware */
-    LOG( LOG_CRIT, "TRACE streamon: about to call isp_v4l2_stream_on" );
     rc = isp_v4l2_stream_on( pstream );
-    LOG( LOG_CRIT, "TRACE streamon: isp_v4l2_stream_on returned rc = %d", rc );
     if ( rc != 0 ) {
         LOG( LOG_ERR, "fail to isp_stream_on. (stream_id = %d, rc=%d)", sp->stream_id, rc );
         isp_v4l2_stream_off( pstream );

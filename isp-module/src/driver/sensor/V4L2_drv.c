@@ -633,9 +633,7 @@ static void start_streaming( void *ctx )
      */
     sensor_set_iface( &supported_modes[p_ctx->param.mode] );
 
-    LOG( LOG_CRIT, "start_streaming: entering, about to call sensor s_stream(1)" );
     rc = v4l2_subdev_call( p_ctx->sensor_sd, video, s_stream, 1 );
-    LOG( LOG_CRIT, "start_streaming: sensor s_stream(1) returned rc = %d", rc );
     if ( rc != 0 && rc != -ENOIOCTLCMD ) {
         LOG( LOG_CRIT, "Failed to start streaming. rc = %d", rc );
         return;
