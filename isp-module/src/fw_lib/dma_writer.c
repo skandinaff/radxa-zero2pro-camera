@@ -24,6 +24,7 @@
 #include "dma_writer.h"
 #include "acamera_firmware_config.h"
 #include "acamera.h"
+#include <linux/moduleparam.h>
 
 #ifdef LOG_MODULE
 #undef LOG_MODULE
@@ -37,6 +38,19 @@
 
 static dma_handle s_handle[FIRMWARE_CONTEXT_NUMBER];
 static int32_t ctx_pos = 0;
+
+/* Bring-up diagnostic: exercise DS1 STREAMON/config propagation with valid
+ * buffers but no writes to them. Load-time only so it cannot release a writer
+ * while a diagnostic capture is in progress. Default behavior is unchanged. */
+static bool ds1_dma_hold;
+module_param( ds1_dma_hold, bool, 0444 );
+MODULE_PARM_DESC( ds1_dma_hold, "Keep both DS1 DMA writers disabled for startup diagnostics" );
+
+static uint8_t dma_writer_enable_value( const dma_pipe *pipe )
+{
+    return !( ds1_dma_hold && pipe->type == dma_ds1 );
+}
+
 dma_error dma_writer_create( void **handle )
 {
     dma_error result = edma_ok;
@@ -327,7 +341,7 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
         pipe->settings.frame_buf_queue[set_i].primary.status = dma_buf_busy;
         pipe->settings.enabled = 1;
         if ( pipe->api.p_acamera_isp_dma_writer_format_read( pipe->settings.isp_base ) != DMA_FORMAT_DISABLE )
-            pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, 1 );
+            pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, dma_writer_enable_value( pipe ) );
         else
             pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, 0 );
 
@@ -340,7 +354,7 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
         //check if format is for UV
         if ( pipe->api.p_acamera_isp_dma_writer_format_read_uv( pipe->settings.isp_base ) != DMA_FORMAT_DISABLE ) {
             pipe->settings.frame_buf_queue[set_i].secondary.status = dma_buf_busy;
-            pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base, 1 );
+            pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base, dma_writer_enable_value( pipe ) );
             pipe->api.p_acamera_isp_dma_writer_line_offset_write_uv( pipe->settings.isp_base, pipe->settings.frame_buf_queue[set_i].secondary.line_offset );
             LOG( LOG_DEBUG, "enabled uv %d", pipe->api.p_acamera_isp_dma_writer_format_read_uv( pipe->settings.isp_base ) );
         } else {
@@ -362,6 +376,10 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
              (unsigned int)pipe->api.p_acamera_isp_dma_writer_format_read_uv( pipe->settings.isp_base ),
              (unsigned int)pipe->api.p_acamera_isp_dma_writer_active_width_read_uv( pipe->settings.isp_base ),
              (unsigned int)pipe->api.p_acamera_isp_dma_writer_active_height_read_uv( pipe->settings.isp_base ) );
+        if ( !dma_writer_enable_value( pipe ) )
+            LOG( LOG_CRIT, "TRACE DS1 DMA HELD: Y address=0x%08x UV address=0x%08x; both writer enables remain zero",
+                 (unsigned int)arm_frame->primary.address,
+                 (unsigned int)arm_frame->secondary.address );
     }
     return i;
 }
@@ -519,7 +537,7 @@ dma_error dma_writer_pipe_update( dma_pipe *pipe , bool drop_frame)
                         pipe->api.p_acamera_isp_dma_writer_bank0_base_write( pipe->settings.isp_base, addr );
                         empty_frame->primary.status = dma_buf_busy;
                         pipe->settings.last_address = addr;
-                        pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, 1 );
+                        pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, dma_writer_enable_value( pipe ) );
                         /*if ( pipe->settings.enabled == 0 ) {
 							pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, 1 );
 							pipe->settings.enabled = 1;
@@ -553,7 +571,7 @@ dma_error dma_writer_pipe_update( dma_pipe *pipe , bool drop_frame)
                         pipe->api.p_acamera_isp_dma_writer_bank0_base_write_uv( pipe->settings.isp_base, addr );
                         empty_frame->secondary.status = dma_buf_busy;
                         pipe->settings.last_address = addr;
-                        pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base, 1 );
+                        pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base, dma_writer_enable_value( pipe ) );
                         /*if ( pipe->settings.enabled == 0 ) {
 							pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base,  1 );
 							//pipe->settings.enabled = 1;
