@@ -140,6 +140,10 @@ static int crop_set_resize_enable( crop_fsm_t *p_fsm, uint16_t type, uint8_t ena
     if ( 0 == rc ) {
 
         LOG( LOG_DEBUG, "resize_type: %d, calling acamera_fsm_mgr_raise_event %x\n", type, event_id_crop_changed );
+        /* Match Khadas armisp-g12b: prepare the config shadow now, before
+         * buffers can arm the writer. The deferred path only applies updates
+         * on an FR writer interrupt, which DS1-only capture never produces. */
+        crop_resolution_changed( p_fsm );
         fsm_raise_event( p_fsm, event_id_crop_changed );
     }
 
