@@ -548,8 +548,13 @@ static void sensor_set_mode( void *ctx, uint8_t mode )
     sensor_update_parameters( p_ctx );
     sensor_print_params( p_ctx );
 
-    /* Bring up the receive path for this geometry before any pixels flow. */
-    sensor_set_iface( &supported_modes[mode] );
+    /*
+     * Record the selected preset; start_streaming() brings the receive path
+     * up from it. Khadas IMX415_drv.c does the same -- param->mode = mode
+     * here, sensor_set_iface() commented out, and the live call moved to
+     * start_streaming().
+     */
+    p_ctx->param.mode = mode;
 }
 
 
@@ -612,6 +617,21 @@ static void start_streaming( void *ctx )
         return;
     if ( p_ctx->streaming_flg )
         return;
+
+    /*
+     * Bring the CSI-2 receive path up here rather than from sensor_set_mode().
+     * stop_streaming() tears it down with am_adap_deinit()/am_mipi_deinit(),
+     * so the matching bring-up belongs on the start path or the two do not
+     * pair. Driving it from the mode set only works when a preset change
+     * precedes every STREAMON -- true for FR, false for a DS1-only stream,
+     * which selects no sensor preset. After the first teardown that left the
+     * sensor being started into a deinitialised receiver: s_stream(1) returned
+     * 0, "imx415 streaming on" printed, and then no frame start ever arrived.
+     *
+     * Khadas IMX415_drv.c has sensor_set_iface() live at the top of
+     * start_streaming() and commented out in sensor_set_mode().
+     */
+    sensor_set_iface( &supported_modes[p_ctx->param.mode] );
 
     LOG( LOG_CRIT, "start_streaming: entering, about to call sensor s_stream(1)" );
     rc = v4l2_subdev_call( p_ctx->sensor_sd, video, s_stream, 1 );
