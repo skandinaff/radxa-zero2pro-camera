@@ -134,17 +134,32 @@ static int isp_vb2_buf_prepare( struct vb2_buffer *vb )
     return 0;
 }
 
-static int isp_vb_to_tframe(tframe_t *frame, isp_v4l2_buffer_t *buf)
+static int isp_vb_to_tframe(isp_v4l2_stream_t *pstream, tframe_t *frame, isp_v4l2_buffer_t *buf)
 {
     dma_addr_t *p_cookie = NULL;
     dma_addr_t *s_cookie = NULL;
     unsigned int p_size = 0;
     unsigned int s_size = 0;
+    unsigned int bytesperline = 0;
 
-    if (frame == NULL || buf == NULL) {
+    if (pstream == NULL || frame == NULL || buf == NULL) {
         LOG(LOG_ERR, "Error input param");
         return -1;
     }
+
+    /* Stride of the buffer we are about to hand the DMA writer, taken from
+     * the format userspace negotiated.  This was missing: the tframe went to
+     * the firmware with line_offset left at 0 from the caller's memset, and
+     * dma_writer_write_frame_queue() then armed the pipe without programming
+     * the stride register at all (both halves are restored together, see
+     * dma_writer.c).  The DMA writer therefore kept the stride belonging to
+     * whatever geometry was programmed last, which for a 1920x1080 DS1 buffer
+     * behind a 3864-wide pipe means writing ~8.7 MB into a 2.07 MB buffer.
+     * Khadas armisp-g12b isp-vb2.c:154 sets this from plane_fmt[0]. */
+    if (pstream->cur_v4l2_fmt.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+        bytesperline = pstream->cur_v4l2_fmt.fmt.pix_mp.plane_fmt[0].bytesperline;
+    else
+        bytesperline = pstream->cur_v4l2_fmt.fmt.pix.bytesperline;
 
     /* virt_to_phys(vb2_plane_vaddr(...)) used to compute these addresses.
      * That is only valid if the buffer's vaddr sits in the kernel's linear
@@ -163,6 +178,7 @@ static int isp_vb_to_tframe(tframe_t *frame, isp_v4l2_buffer_t *buf)
     }
     frame->primary.address = *p_cookie;
     frame->primary.size = p_size;
+    frame->primary.line_offset = bytesperline;
 
     /* Plane 1 (UV/secondary) legitimately does not exist for single-plane
      * formats like the GREY format this pipeline captures -- num_planes
@@ -180,9 +196,11 @@ static int isp_vb_to_tframe(tframe_t *frame, isp_v4l2_buffer_t *buf)
         }
         frame->secondary.address = *s_cookie;
         frame->secondary.size = s_size;
+        frame->secondary.line_offset = bytesperline;
     } else {
         frame->secondary.address = 0;
         frame->secondary.size = 0;
+        frame->secondary.line_offset = 0;
     }
 
     frame->list = (void *)&buf->list;
@@ -227,7 +245,7 @@ static void isp_frame_buff_queue(void *stream, isp_v4l2_buffer_t *buf, unsigned 
 
     if ((s_type == V4L2_STREAM_TYPE_FR) ||
         (s_type == V4L2_STREAM_TYPE_DS1)) {
-        rc = isp_vb_to_tframe(&f_buff, buf);
+        rc = isp_vb_to_tframe(pstream, &f_buff, buf);
         if (rc != 0) {
            LOG( LOG_INFO, "isp vb to tframe is error.");
            return;
@@ -238,7 +256,7 @@ static void isp_frame_buff_queue(void *stream, isp_v4l2_buffer_t *buf, unsigned 
 
 #if ISP_HAS_DS2
     if (s_type == V4L2_STREAM_TYPE_DS2) {
-        rc = isp_vb_to_tframe(&f_buff, buf);
+        rc = isp_vb_to_tframe(pstream, &f_buff, buf);
         if (rc != 0) {
            LOG( LOG_INFO, "isp vb to tframe is error.");
            return;

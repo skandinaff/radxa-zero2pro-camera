@@ -248,6 +248,13 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
     if ( frame_buf_len == 0 )
         return 0;
 
+    LOG( LOG_CRIT, "TRACE wfq: type=%d len=%u enabled=%u init=%u %ux%u stride=%u bufsz=%u",
+         (int)type, (unsigned int)frame_buf_len, (unsigned int)pipe->settings.enabled,
+         (unsigned int)pipe->state.initialized,
+         (unsigned int)pipe->settings.width, (unsigned int)pipe->settings.height,
+         (unsigned int)frame_buf_array[0].primary.line_offset,
+         (unsigned int)frame_buf_array[0].primary.size );
+
     int index = 0;
     for ( i = 0; i < MAX_DMA_QUEUE_FRAMES; i++ ) {
         index = ( i + pipe->state.buf_num_rdi ) % MAX_DMA_QUEUE_FRAMES;
@@ -274,6 +281,28 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
     }
 
     if ( pipe->settings.enabled == 0 ) {
+        /* NOT upstream: refuse to arm the writer when the geometry the pipe is
+         * configured for does not fit the buffer we are about to point it at.
+         * Nothing below this point re-checks, and a mismatch here means the
+         * ISP DMAs straight past the end of the buffer into whatever kernel
+         * memory follows -- which is how a 1080p DS1 request behind a 3864-wide
+         * pipe took the board down. Loud, and leaves the pipe disabled. */
+        uint32_t arm_stride = pipe->settings.frame_buf_queue[set_i].primary.line_offset;
+        uint32_t arm_size = arm_stride * pipe->settings.height;
+
+        LOG( LOG_CRIT, "TRACE dma arm: pipe=%d %ux%u stride=%u need=%u have=%u",
+             (int)pipe->type, (unsigned int)pipe->settings.width, (unsigned int)pipe->settings.height,
+             arm_stride, arm_size, (unsigned int)pipe->settings.frame_buf_queue[set_i].primary.size );
+
+        if ( arm_stride == 0 || arm_size > pipe->settings.frame_buf_queue[set_i].primary.size ) {
+            LOG( LOG_CRIT, "%s: refusing to arm pipe %d -- %ux%u stride %u needs %u bytes, buffer is %u",
+                 TAG, (int)pipe->type, (unsigned int)pipe->settings.width, (unsigned int)pipe->settings.height,
+                 arm_stride, arm_size, (unsigned int)pipe->settings.frame_buf_queue[set_i].primary.size );
+            pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, 0 );
+            pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base, 0 );
+            return i;
+        }
+
         DMA_PRINTF( ( "dma re-enabling\n" ) );
         pipe->api.p_acamera_isp_dma_writer_bank0_base_write( pipe->settings.isp_base, pipe->settings.frame_buf_queue[set_i].primary.address );
         pipe->api.p_acamera_isp_dma_writer_bank0_base_write_uv( pipe->settings.isp_base, pipe->settings.frame_buf_queue[set_i].secondary.address );
@@ -286,10 +315,17 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
         else
             pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, 0 );
 
+        /* Restored from Khadas armisp-g12b dma_writer.c:293,299. Dropping these
+         * left the very first frame after arming to be written with whatever
+         * stride the register happened to hold; only the per-frame path in
+         * dma_writer_pipe_update() reprogrammed it, one frame too late. */
+        pipe->api.p_acamera_isp_dma_writer_line_offset_write( pipe->settings.isp_base, pipe->settings.frame_buf_queue[set_i].primary.line_offset );
+
         //check if format is for UV
         if ( pipe->api.p_acamera_isp_dma_writer_format_read_uv( pipe->settings.isp_base ) != DMA_FORMAT_DISABLE ) {
             pipe->settings.frame_buf_queue[set_i].secondary.status = dma_buf_busy;
             pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base, 1 );
+            pipe->api.p_acamera_isp_dma_writer_line_offset_write_uv( pipe->settings.isp_base, pipe->settings.frame_buf_queue[set_i].secondary.line_offset );
             LOG( LOG_DEBUG, "enabled uv %d", pipe->api.p_acamera_isp_dma_writer_format_read_uv( pipe->settings.isp_base ) );
         } else {
             //cannot enable
