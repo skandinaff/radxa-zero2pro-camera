@@ -602,7 +602,19 @@ int32_t acamera_init_context_seq( acamera_context_t *p_ctx )
     p_ctx->isp_context_seq.seq_num = param->isp_context_seq.seq_num;
     LOG(LOG_ERR, "load isp context sequence[%d]\n", param->isp_context_seq.seq_num);
 
+#if ISP_HAS_TEMPER
+    /* sensor_configure_buffers() has already decided whether Temper has
+     * usable history buffers. The vendor context sequence assumes those
+     * buffers exist and clears the bypass. Preserve the sensor's decision:
+     * DS1-only S_FMT does not select a sensor preset, so it will not run
+     * sensor_configure_buffers() again before starting the sensor. */
+    uint8_t temper_bypass = acamera_isp_top_bypass_temper_read( p_ctx->settings.isp_base );
+#endif
     acamera_load_sw_sequence( p_ctx->settings.isp_base, p_ctx->isp_context_seq.sequence, p_ctx->isp_context_seq.seq_num );
+#if ISP_HAS_TEMPER
+    acamera_isp_top_bypass_temper_write( p_ctx->settings.isp_base, temper_bypass );
+    LOG( LOG_CRIT, "TRACE context: preserved sensor Temper bypass=%u", (unsigned int)temper_bypass );
+#endif
 
     /*
      * Re-disarm the output DMA writers that the context sequence just armed.
