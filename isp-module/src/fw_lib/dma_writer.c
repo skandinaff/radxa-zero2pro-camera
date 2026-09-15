@@ -287,17 +287,33 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
          * ISP DMAs straight past the end of the buffer into whatever kernel
          * memory follows -- which is how a 1080p DS1 request behind a 3864-wide
          * pipe took the board down. Loud, and leaves the pipe disabled. */
-        uint32_t arm_stride = pipe->settings.frame_buf_queue[set_i].primary.line_offset;
+        tframe_t *arm_frame = &pipe->settings.frame_buf_queue[set_i];
+        uint32_t arm_stride = arm_frame->primary.line_offset;
         uint32_t arm_size = arm_stride * pipe->settings.height;
+        uint32_t arm_stride_uv = arm_frame->secondary.line_offset;
+        uint8_t fmt_uv = pipe->api.p_acamera_isp_dma_writer_format_read_uv( pipe->settings.isp_base );
+        /* The UV plane carries half the luma rows. The writer is programmed
+         * with the full height for both planes (see dma_writer_update_state(),
+         * which matches the reference) and halves it internally for the
+         * semi-planar chroma.
+         *
+         * Measured, not assumed: an FR arm at 3864x2192 reports a UV plane of
+         * 4349952 bytes against a 3968 stride, and 3968 * 2192 / 2 = 4348928
+         * fits while 3968 * 2192 = 8697856 does not. Budgeting the full height
+         * here rejected the FR pipe outright, which is how this was caught. */
+        uint32_t arm_size_uv = ( fmt_uv != DMA_FORMAT_DISABLE ) ? arm_stride_uv * ( pipe->settings.height / 2 ) : 0;
 
-        LOG( LOG_CRIT, "TRACE dma arm: pipe=%d %ux%u stride=%u need=%u have=%u",
+        LOG( LOG_CRIT, "TRACE dma arm: pipe=%d %ux%u stride=%u need=%u have=%u | uv fmt=%u stride=%u need=%u have=%u",
              (int)pipe->type, (unsigned int)pipe->settings.width, (unsigned int)pipe->settings.height,
-             arm_stride, arm_size, (unsigned int)pipe->settings.frame_buf_queue[set_i].primary.size );
+             arm_stride, arm_size, (unsigned int)arm_frame->primary.size,
+             (unsigned int)fmt_uv, arm_stride_uv, arm_size_uv, (unsigned int)arm_frame->secondary.size );
 
-        if ( arm_stride == 0 || arm_size > pipe->settings.frame_buf_queue[set_i].primary.size ) {
-            LOG( LOG_CRIT, "%s: refusing to arm pipe %d -- %ux%u stride %u needs %u bytes, buffer is %u",
+        if ( arm_stride == 0 || arm_size > arm_frame->primary.size ||
+             ( arm_size_uv && arm_size_uv > arm_frame->secondary.size ) ) {
+            LOG( LOG_CRIT, "%s: refusing to arm pipe %d -- %ux%u y(stride %u, %u vs %u) uv(stride %u, %u vs %u)",
                  TAG, (int)pipe->type, (unsigned int)pipe->settings.width, (unsigned int)pipe->settings.height,
-                 arm_stride, arm_size, (unsigned int)pipe->settings.frame_buf_queue[set_i].primary.size );
+                 arm_stride, arm_size, (unsigned int)arm_frame->primary.size,
+                 arm_stride_uv, arm_size_uv, (unsigned int)arm_frame->secondary.size );
             pipe->api.p_acamera_isp_dma_writer_frame_write_on_write( pipe->settings.isp_base, 0 );
             pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base, 0 );
             return i;
@@ -332,6 +348,20 @@ uint16_t dma_writer_write_frame_queue( void *handle, dma_type type, tframe_t *fr
             pipe->api.p_acamera_isp_dma_writer_frame_write_on_write_uv( pipe->settings.isp_base, 0 );
             LOG( LOG_DEBUG, "cannot enable uv %d", pipe->api.p_acamera_isp_dma_writer_format_read_uv( pipe->settings.isp_base ) );
         }
+
+        /* Read the geometry back out of the config page after arming. These
+         * accessors are system_sw_*, i.e. they touch the shadow the ISP only
+         * picks up at the next frame start -- so this says what the hardware is
+         * about to be told, not what it currently holds, and a disagreement
+         * with the values above means the write did not land where intended. */
+        LOG( LOG_CRIT, "TRACE dma armed readback: pipe=%d fmt=%u %ux%u | uv fmt=%u %ux%u",
+             (int)pipe->type,
+             (unsigned int)pipe->api.p_acamera_isp_dma_writer_format_read( pipe->settings.isp_base ),
+             (unsigned int)pipe->api.p_acamera_isp_dma_writer_active_width_read( pipe->settings.isp_base ),
+             (unsigned int)pipe->api.p_acamera_isp_dma_writer_active_height_read( pipe->settings.isp_base ),
+             (unsigned int)pipe->api.p_acamera_isp_dma_writer_format_read_uv( pipe->settings.isp_base ),
+             (unsigned int)pipe->api.p_acamera_isp_dma_writer_active_width_read_uv( pipe->settings.isp_base ),
+             (unsigned int)pipe->api.p_acamera_isp_dma_writer_active_height_read_uv( pipe->settings.isp_base ) );
     }
     return i;
 }

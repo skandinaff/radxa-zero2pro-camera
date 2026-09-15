@@ -18,6 +18,8 @@
 */
 
 #include <linux/device.h>
+#include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <asm/div64.h>
@@ -44,13 +46,47 @@ static int custom_wdr_mode = 0;
 static int custom_exp = 0;
 
 /*
- * Whether the FR stream has actually been started (sensor streaming) since the
- * last stop. fw_intf_stream_stop() is called far more often than it is useful:
- * on close(), on the STREAMON failure path, and once per stream type on every
- * open(). Only the FR-started case needs the ISP drained. See
- * acamera_fw_stream_quiesce().
+ * Which streams have actually been started (sensor streaming) since their last
+ * stop, one bit per isp_v4l2_stream_type_t.
+ *
+ * This is a mask rather than a flag because acamera_fw_stream_rearm() and
+ * acamera_fw_stream_quiesce() act on the ISP block as a whole, not on one
+ * stream: rearm unmasks the global interrupt vector and puts the input port
+ * back into SAFE_START, quiesce drains the pipeline and masks everything
+ * again. So they belong to the first stream to start and the last one to stop,
+ * whichever those happen to be -- the same "am I the last user" question the
+ * Khadas reference answers with its stream_on_count parameter to
+ * fw_intf_stream_stop().
+ *
+ * A mask rather than a count because fw_intf_stream_stop() is called far more
+ * often than it is useful: on close(), on the STREAMON failure path, and once
+ * per stream type on every open(). A counter would go negative on those; a
+ * per-stream bit simply ignores a stop for something that was never started.
  */
-static int fr_stream_active = 0;
+static uint32_t isp_stream_on_mask = 0;
+
+#define ISP_STREAM_BIT( t ) ( 1u << (unsigned int)( t ) )
+
+/*
+ * Whether acamera_fw_stream_rearm() runs for the first stream of any type
+ * (true) or only for FR (false).
+ *
+ * This exists because the two settings have very different blast radii while
+ * DS1 is still being brought up. With it false a DS1-only stream leaves the
+ * ISP masked and in SAFE_STOP: no frame-done interrupt ever fires, DQBUF times
+ * out after five seconds, and the board stays up -- which makes it safe to arm
+ * the DS1 pipe and then read the programmed geometry back. With it true the
+ * ISP actually processes frames, and any remaining geometry error is written
+ * into kernel memory by the DMA engine, which takes the board down hard with
+ * no recoverable log.
+ *
+ * Default false so that a mistake costs a timeout rather than a reset. Flip it
+ * deliberately, with a UART capture already running.
+ */
+static bool stream_rearm_any = false;
+module_param( stream_rearm_any, bool, 0644 );
+MODULE_PARM_DESC( stream_rearm_any,
+                  "Re-arm the ISP for the first stream of any type, not just FR (default: FR only)" );
 
 /* Defined in src/fw_lib/acamera_fw.c. Declared here rather than by including
  * acamera_fw.h, which pulls in the whole FSM manager, matching how this file
@@ -339,21 +375,27 @@ int fw_intf_stream_start( isp_v4l2_stream_type_t streamType )
      * the start side was asymmetric.
      */
     if (streamType == V4L2_STREAM_TYPE_FR || streamType == V4L2_STREAM_TYPE_DS1) {
-        if (streamType == V4L2_STREAM_TYPE_FR) {
-            /* Undo anything a previous session left latched (masked
-             * interrupts, SAFE_STOP, a spent error budget) before pixels start
-             * arriving. acamera_fw_init() only runs at module load, so without
-             * this a second STREAMON in the same load starts the sensor into a
-             * deaf ISP.
-             *
-             * This rearm is ours, not upstream's: the reference does nothing
-             * here but SENSOR_STREAMING ON. Keep it scoped to FR. Applying it
-             * on the DS1 path as well hard-hung the board on the first DS1
-             * STREAMON (watchdog reset, no panic recorded in pstore), so DS1
-             * follows the reference exactly. */
+        /* Undo anything a previous session left latched (masked interrupts,
+         * SAFE_STOP, a spent error budget) before pixels start arriving.
+         * acamera_fw_init() only runs at module load, so without this a second
+         * STREAMON in the same load starts the sensor into a deaf ISP.
+         *
+         * This rearm is ours, not upstream's: the reference does nothing here
+         * but SENSOR_STREAMING ON. It was previously scoped to FR because
+         * applying it on DS1 hard-hung the board on the first DS1 STREAMON --
+         * but that hang was the DMA writer being armed without a stride and
+         * scribbling over kernel memory, fixed in dma_writer.c / isp-vb2.c, not
+         * the rearm. With the stride fix in place a DS1-only stream instead
+         * fails silently: the ISP stays masked and in SAFE_STOP, the sensor
+         * streams into a block that is not listening, no frame-done interrupt
+         * ever fires and userspace times out in DQBUF.
+         *
+         * Since rearm is ISP-block-wide, it belongs to whichever stream starts
+         * first, not to FR specifically. */
+        if ( !isp_stream_on_mask &&
+             ( stream_rearm_any || streamType == V4L2_STREAM_TYPE_FR ) )
             acamera_fw_stream_rearm();
-            fr_stream_active = 1;
-        }
+        isp_stream_on_mask |= ISP_STREAM_BIT( streamType );
 
         LOG( LOG_CRIT, "TRACE fw_intf_stream_start: about to acamera_command(SENSOR_STREAMING, ON)" );
         acamera_command( TSENSOR, SENSOR_STREAMING, ON, COMMAND_SET, &rc );
@@ -386,7 +428,7 @@ void fw_intf_stream_stop( isp_v4l2_stream_type_t streamType )
     }
 #endif
 
-    if (streamType == V4L2_STREAM_TYPE_FR) {
+    if (streamType == V4L2_STREAM_TYPE_FR || streamType == V4L2_STREAM_TYPE_DS1) {
         /*
          * Order matters, and it used to be the wrong way round. SENSOR_STREAMING
          * OFF runs V4L2_drv.c stop_streaming(), which does s_stream(0) +
@@ -398,21 +440,25 @@ void fw_intf_stream_stop( isp_v4l2_stream_type_t streamType )
          * So drain the ISP first, while pixels are still flowing and SAFE_STOP
          * can still be honoured at a frame boundary.
          *
-         * The fr_stream_active guard is for the calls where nothing was ever
-         * started: isp_v4l2_stream_off() also runs on every close() and on the
-         * STREAMON failure path, and this function is additionally reached once
-         * per stream type on open(). With no sensor streaming there is no frame
-         * to finish, so the drain could only ever burn its full timeout.
+         * Both the drain and the sensor stop belong to the *last* stream to go,
+         * not to FR: FR and DS1 share one sensor and one ISP. This is what the
+         * reference expresses as `if (stream_on_count == 1)` in both branches.
+         * The mask test also covers the calls where nothing was ever started --
+         * close(), the STREAMON failure path, and once per stream type on every
+         * open() -- where there is no frame to finish and the drain could only
+         * burn its full timeout.
          */
-        if ( fr_stream_active ) {
-            acamera_fw_stream_quiesce();
-            fr_stream_active = 0;
+        if ( isp_stream_on_mask & ISP_STREAM_BIT( streamType ) ) {
+            isp_stream_on_mask &= ~ISP_STREAM_BIT( streamType );
+
+            if ( !isp_stream_on_mask ) {
+                acamera_fw_stream_quiesce();
+                acamera_command( TSENSOR, SENSOR_STREAMING, OFF, COMMAND_SET, &rc );
+            }
         }
 
-        acamera_command( TSENSOR, SENSOR_STREAMING, OFF, COMMAND_SET, &rc );
-        acamera_api_dma_buff_queue_reset(dma_fr);
-    } else if (streamType == V4L2_STREAM_TYPE_DS1) {
-        acamera_api_dma_buff_queue_reset(dma_ds1);
+        acamera_api_dma_buff_queue_reset(
+            streamType == V4L2_STREAM_TYPE_FR ? dma_fr : dma_ds1 );
     }
 
 #if ISP_HAS_DS2
