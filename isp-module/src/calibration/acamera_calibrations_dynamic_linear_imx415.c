@@ -624,8 +624,7 @@ static uint16_t _calibration_AWB_bg_max_gain[][2] = {
  */
 static uint32_t _calibration_cmos_control[] = {
     1,   // enable antiflicker -- ENABLED (ARM ref 0). See note above.
-    60,  // antiflicker frequency [Hz] -- 60 for North American mains.
-         // *** SET THIS TO 50 FOR 50 Hz MAINS (EU/UK/AU/most of Asia). ***
+    50,  // antiflicker frequency [Hz] -- Birdcher deployment uses 50 Hz mains.
     0,   // manual integration time
     0,   // manual sensor analog gain
     0,   // manual sensor digital gain

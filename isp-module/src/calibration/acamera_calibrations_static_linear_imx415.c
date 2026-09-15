@@ -830,38 +830,14 @@ static uint8_t _calibration_demosaic[] = {
 static uint8_t _calibration_wdr_np_lut[] = {14, 27, 35, 42, 48, 53, 57, 62, 66, 69, 73, 76, 80, 83, 86, 89, 92, 94, 97, 100, 102, 105, 107, 109, 112, 114, 116, 118, 120, 123, 125, 127, 129, 131, 133, 134, 136, 138, 140, 142, 144, 145, 147, 149, 151, 152, 154, 156, 157, 159, 160, 162, 164, 165, 167, 168, 170, 171, 173, 174, 176, 177, 178, 180, 181, 183, 184, 185, 187, 188, 190, 191, 192, 194, 195, 196, 197, 199, 200, 201, 203, 204, 205, 206, 208, 209, 210, 211, 212, 214, 215, 216, 217, 218, 219, 221, 222, 223, 224, 225, 226, 227, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255};
 
 // CALIBRATION_GAMMA
-/* SOURCE: principled neutral choice for this CV application -- exact linear.
- * 129 entries, 12-bit output: gamma[i] = round(i * 4095 / 128).
- *
- * This is the deliberate departure from every photographic tuning, so: the ARM
- * reference curve is roughly a 1/2.0 encoding gamma, and the OpenIPC IMX415
- * profile carries something even more aggressive (it lifts input 16/255 to
- * 169/1023). Both exist to make shadows visible to a human eye on an sRGB
- * display.
- *
- * That is actively harmful downstream. Otsu's method maximises between-class
- * variance on the intensity histogram, and it is a *thresholding* rule, not a
- * ranking rule -- a monotone but nonlinear remap does not commute with it. A
- * shadow-lifting curve compresses the highlight end where the white paper sits
- * and expands the dark end where the bullet holes sit, which drags the optimal
- * split point around as scene brightness changes. Frame differencing is worse
- * still: with a nonlinear gamma the magnitude of a fixed reflectance change
- * depends on the absolute level it happens at, so the same new hole produces a
- * different delta depending on how bright the target was lit.
- *
- * Linear gamma makes output DN proportional to scene radiance, which is the
- * assumption both stages are built on.
+/* SOURCE: ARM/Khadas reference curve, restored for Birdcher's photographic
+ * output. The previous exact-linear LUT was deliberate tuning for a grayscale
+ * target-measurement pipeline, but it made normally lit shadows appear black
+ * in browser video. This monotone encoding curve lifts shadows while retaining
+ * the full 12-bit output range.
  */
-static uint16_t _calibration_gamma[] = {
-    0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 480,
-    512, 544, 576, 608, 640, 672, 704, 736, 768, 800, 832, 864, 896, 928, 960, 992,
-    1024, 1056, 1088, 1120, 1152, 1184, 1216, 1248, 1280, 1312, 1344, 1376, 1408, 1440, 1472, 1504,
-    1536, 1568, 1600, 1632, 1664, 1696, 1728, 1760, 1792, 1824, 1856, 1888, 1920, 1952, 1984, 2016,
-    2048, 2079, 2111, 2143, 2175, 2207, 2239, 2271, 2303, 2335, 2367, 2399, 2431, 2463, 2495, 2527,
-    2559, 2591, 2623, 2655, 2687, 2719, 2751, 2783, 2815, 2847, 2879, 2911, 2943, 2975, 3007, 3039,
-    3071, 3103, 3135, 3167, 3199, 3231, 3263, 3295, 3327, 3359, 3391, 3423, 3455, 3487, 3519, 3551,
-    3583, 3615, 3647, 3679, 3711, 3743, 3775, 3807, 3839, 3871, 3903, 3935, 3967, 3999, 4031, 4063,
-    4095};
+static uint16_t _calibration_gamma[] =
+    {0, 89, 198, 318, 438, 551, 654, 746, 828, 905, 979, 1047, 1115, 1180, 1242, 1305, 1365, 1425, 1482, 1539, 1593, 1645, 1695, 1743, 1792, 1838, 1884, 1928, 1972, 2013, 2054, 2092, 2129, 2164, 2197, 2229, 2261, 2290, 2319, 2348, 2375, 2402, 2429, 2455, 2479, 2504, 2529, 2554, 2578, 2601, 2624, 2647, 2669, 2691, 2712, 2733, 2754, 2775, 2797, 2817, 2837, 2858, 2878, 2898, 2918, 2939, 2959, 2979, 2999, 3018, 3038, 3057, 3077, 3095, 3115, 3134, 3153, 3172, 3191, 3210, 3228, 3248, 3266, 3285, 3304, 3322, 3341, 3360, 3379, 3398, 3416, 3434, 3453, 3471, 3490, 3507, 3526, 3544, 3563, 3581, 3598, 3617, 3635, 3653, 3671, 3689, 3707, 3725, 3742, 3761, 3778, 3796, 3814, 3832, 3849, 3867, 3884, 3902, 3920, 3937, 3955, 3972, 3990, 4008, 4025, 4043, 4060, 4078, 4095};
 /*{0, 120, 246, 370, 478, 574, 661, 743, 819, 891, 962, 1031, 1100, 1167, 1232, 1298, 1360, 1421, 1481, 1539, 1596, 1650, 1703, 1755, 1805, 1853, 1899, 1944, 1988, 2029, 2070, 2107, 2145, 2179, 2212, 2245, 2276, 2305, 2334, 2363, 2390, 2416, 2442, 2467, 2491, 2515, 2538, 2562, 2584, 2606, 2628, 2649, 2671, 2691, 2712, 2732, 2752, 2772, 2793, 2812, 2832, 2851, 2871, 2890, 2910, 2930, 2949, 2968, 2988, 3008, 3027, 3047, 3067, 3086, 3106, 3126, 3146, 3165, 3185, 3205, 3224, 3244, 3263, 3282, 3301, 3320, 3340, 3359, 3378, 3397, 3416, 3434, 3453, 3472, 3491, 3509, 3527, 3545, 3564, 3583, 3601, 3619, 3637, 3655, 3674, 3692, 3709, 3728, 3745, 3764, 3782, 3799, 3817, 3834, 3852, 3870, 3887, 3905, 3923, 3939, 3957, 3974, 3991, 4009, 4026, 4044, 4061, 4078, 4095};*/
 
 // static uint16_t _calibration_gamma[]
