@@ -70,7 +70,7 @@ static uint8_t _calibration_evtolux_probability_enable[] = {1};
 
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * AWB tuning. Left at the reference deliberately rather than retuned: white
- * balance in this build is pinned by CALIBRATION_STATIC_WB and an identity CCM,
+ * balance in this build is fixed by CALIBRATION_STATIC_WB x manual gains,
  * so the adaptive AWB path should not be moving anything. Retuning tables that
  * are meant to be inert would only obscure that intent.
  *
@@ -92,7 +92,7 @@ static uint8_t _calibration_iridix_avg_coef[] = {30};
 
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * AWB tuning. Left at the reference deliberately rather than retuned: white
- * balance in this build is pinned by CALIBRATION_STATIC_WB and an identity CCM,
+ * balance in this build is fixed by CALIBRATION_STATIC_WB x manual gains,
  * so the adaptive AWB path should not be moving anything. Retuning tables that
  * are meant to be inert would only obscure that intent.
  *
@@ -580,7 +580,7 @@ static uint16_t _calibration_dp_threshold[][2] = {
 
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * AWB tuning. Left at the reference deliberately rather than retuned: white
- * balance in this build is pinned by CALIBRATION_STATIC_WB and an identity CCM,
+ * balance in this build is fixed by CALIBRATION_STATIC_WB x manual gains,
  * so the adaptive AWB path should not be moving anything. Retuning tables that
  * are meant to be inert would only obscure that intent.
  *
@@ -840,7 +840,7 @@ static uint16_t _calibration_fs_mc_off[] = {
 };
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * AWB tuning. Left at the reference deliberately rather than retuned: white
- * balance in this build is pinned by CALIBRATION_STATIC_WB and an identity CCM,
+ * balance in this build is fixed by CALIBRATION_STATIC_WB x manual gains,
  * so the adaptive AWB path should not be moving anything. Retuning tables that
  * are meant to be inert would only obscure that intent.
  *
@@ -856,7 +856,7 @@ static int16_t _AWB_colour_preference[] = {7500, 6000, 4700, 2800};
 
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * AWB tuning. Left at the reference deliberately rather than retuned: white
- * balance in this build is pinned by CALIBRATION_STATIC_WB and an identity CCM,
+ * balance in this build is fixed by CALIBRATION_STATIC_WB x manual gains,
  * so the adaptive AWB path should not be moving anything. Retuning tables that
  * are meant to be inert would only obscure that intent.
  *

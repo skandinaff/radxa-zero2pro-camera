@@ -54,7 +54,7 @@
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -68,7 +68,7 @@ static uint16_t _calibration_light_src[][2] = {
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -79,7 +79,7 @@ static uint16_t _calibration_rg_pos[] = {180, 195, 211, 227, 243, 256, 275, 291,
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -90,7 +90,7 @@ static uint16_t _calibration_bg_pos[] = {137, 157, 173, 189, 205, 220, 236, 256,
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -116,7 +116,7 @@ static uint16_t _calibration_mesh_rgbg_weight[][15] = {
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -142,7 +142,7 @@ static uint16_t _calibration_mesh_ls_weight[][15] = {
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -168,7 +168,7 @@ static uint16_t _calibration_mesh_color_temperature[][15] = {
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -179,7 +179,7 @@ static uint16_t _calibration_wb_strength[] = {1000, 1000, 1000};
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -190,7 +190,7 @@ static uint16_t _calibration_sky_lux_th[] = {10000};
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -201,7 +201,7 @@ static uint16_t _calibration_ct_rg_pos_calc[] = {195, 212, 228, 256, 309, 379, 4
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -212,7 +212,7 @@ static uint16_t _calibration_ct_bg_pos_calc[] = {363, 315, 287, 256, 199, 164, 1
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -223,7 +223,7 @@ static uint16_t _calibration_color_temp[] = {107, 128, 154, 189, 253, 345, 370};
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -234,7 +234,7 @@ static uint16_t _calibration_ct65pos[] = {2};
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -245,7 +245,7 @@ static uint16_t _calibration_ct40pos[] = {6};
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.
@@ -453,84 +453,44 @@ static uint16_t _calibration_black_level_b[][2] = {
     {256, 202}};
 
 // CALIBRATION_STATIC_WB
-/* SOURCE: IMX415-AAQR-C datasheet (E19504), "Image Sensor Characteristics".
- * Order is {R, Gr, Gb, B}, 256 = unity gain.
+/* SOURCE: Khadas IMX415 calibration, common_drivers 3a11a86,
+ * drivers/armisp-g12b/subdev/iq/src/calibration/acamera_calibrations_static_linear_imx415.c.
+ * Order is {R, Gr, Gb, B}, 256 = unity gain: R x1.85, B x2.21.
  *
- * The datasheet gives sensitivity ratios rather than white-balance gains:
- * R/G = 0.42 min / 0.58 max, B/G = 0.26 min / 0.44 max. White balance is the
- * inverse of sensitivity, so taking the midpoints:
- *     R gain = 256 / 0.50 = 512
- *     B gain = 256 / 0.35 = 731
- *
- * CAVEAT, stated because it is a real one: those ratios are measured under
- * Sony's "standard imaging condition II", a 3200 K source behind an IR-cut
- * filter. This is therefore a tungsten-referenced white balance. Under daylight
- * or white LED the true blue gain is lower and the red gain higher.
- *
- * That is deliberately tolerable here. The consumer is a grayscale CV pipeline;
- * white balance reaches it only through the RGB->Y matrix, where a channel gain
- * error becomes a small luma scale error that Otsu is invariant to. What the
- * pipeline cannot tolerate is white balance *changing* between two frames, so
- * being fixed matters far more than being right.
- *
- * Refine with the grey-card procedure in docs/calibration-imx415.md if the
- * range lighting turns out to clip a channel.
+ * Adopted 2026-09-29 (Birdcher CAM-001) when this camera moved from grayscale CV
+ * to a colour viewer. The previous value {512, 256, 256, 731} was derived from
+ * the IMX415 datasheet sensitivity ratios under a 3200 K source. Scene-specific
+ * correction is applied on top through the V4L2 awb_red/blue_gain_set controls
+ * (global_awb_*_gain, 256 = 1.0), which awb_normalise() multiplies in.
  */
-static uint16_t _calibration_static_wb[] = {512, 256, 256, 731};
+static uint16_t _calibration_static_wb[] = {474, 256, 256, 565};
 
 // RR RG RB GR GG GB BR BG BB
-/* SOURCE: principled neutral choice for this CV application -- identity.
- * Format is RR RG RB GR GG GB BR BG BB in s.8 fixed point (256 = 1.0, values
- * >= 32768 encode -(v - 32768)); rows sum to 256. The ARM reference rows carry
- * off-diagonal terms of -0.4 to +1.6.
- *
- * Identity is the right answer for a grayscale consumer. A colour-correction
- * matrix trades colour accuracy for luma noise: every off-diagonal term mixes
- * an independent channel's noise into the output, so a typical CCM inflates
- * luma noise by roughly the row norm (~1.6x for the ARM rows) while buying us
- * nothing -- the downstream pipeline throws the chroma away. Identity also
- * keeps the response monotone in scene luminance, which is what Otsu assumes.
- *
- * All three light sources are identity so that a colour-temperature change can
- * never step the response mid-session.
+/* SOURCE: Khadas IMX415 calibration, common_drivers 3a11a86 (same file as
+ * CALIBRATION_STATIC_WB). s.8 fixed point, 256 = 1.0, values >= 32768 encode
+ * -(v - 32768); rows sum to 256 so neutral stays neutral. Signed values
+ * (divide by 256): [507, -191, -60; -196, 590, -137; 31, -313, 538].
+ * Replaced the CV-era identity matrix on 2026-09-29 (CAM-001).
  */
-static uint16_t _calibration_mt_absolute_ls_a_ccm[] = {256, 0, 0, 0, 256, 0, 0, 0, 256};
+static uint16_t _calibration_mt_absolute_ls_a_ccm[] = {507, 32959, 32828, 32964, 590, 32905, 31, 33081, 538};
 
 // RR RG RB GR GG GB BR BG BB
-/* SOURCE: principled neutral choice for this CV application -- identity.
- * Format is RR RG RB GR GG GB BR BG BB in s.8 fixed point (256 = 1.0, values
- * >= 32768 encode -(v - 32768)); rows sum to 256. The ARM reference rows carry
- * off-diagonal terms of -0.4 to +1.6.
- *
- * Identity is the right answer for a grayscale consumer. A colour-correction
- * matrix trades colour accuracy for luma noise: every off-diagonal term mixes
- * an independent channel's noise into the output, so a typical CCM inflates
- * luma noise by roughly the row norm (~1.6x for the ARM rows) while buying us
- * nothing -- the downstream pipeline throws the chroma away. Identity also
- * keeps the response monotone in scene luminance, which is what Otsu assumes.
- *
- * All three light sources are identity so that a colour-temperature change can
- * never step the response mid-session.
+/* SOURCE: Khadas IMX415 calibration, common_drivers 3a11a86 (same file as
+ * CALIBRATION_STATIC_WB). s.8 fixed point, 256 = 1.0, values >= 32768 encode
+ * -(v - 32768); rows sum to 256 so neutral stays neutral. Signed values
+ * (divide by 256): [511, -206, -48; -165, 570, -147; 24, -260, 493].
+ * Replaced the CV-era identity matrix on 2026-09-29 (CAM-001).
  */
-static uint16_t _calibration_mt_absolute_ls_d40_ccm[] = {256, 0, 0, 0, 256, 0, 0, 0, 256};
+static uint16_t _calibration_mt_absolute_ls_d40_ccm[] = {511, 32974, 32816, 32933, 570, 32915, 24, 33028, 493};
 
 // RR RG RB GR GG GB BR BG BB
-/* SOURCE: principled neutral choice for this CV application -- identity.
- * Format is RR RG RB GR GG GB BR BG BB in s.8 fixed point (256 = 1.0, values
- * >= 32768 encode -(v - 32768)); rows sum to 256. The ARM reference rows carry
- * off-diagonal terms of -0.4 to +1.6.
- *
- * Identity is the right answer for a grayscale consumer. A colour-correction
- * matrix trades colour accuracy for luma noise: every off-diagonal term mixes
- * an independent channel's noise into the output, so a typical CCM inflates
- * luma noise by roughly the row norm (~1.6x for the ARM rows) while buying us
- * nothing -- the downstream pipeline throws the chroma away. Identity also
- * keeps the response monotone in scene luminance, which is what Otsu assumes.
- *
- * All three light sources are identity so that a colour-temperature change can
- * never step the response mid-session.
+/* SOURCE: Khadas IMX415 calibration, common_drivers 3a11a86 (same file as
+ * CALIBRATION_STATIC_WB). s.8 fixed point, 256 = 1.0, values >= 32768 encode
+ * -(v - 32768); rows sum to 256 so neutral stays neutral. Signed values
+ * (divide by 256): [585, -376, 47; -139, 534, -139; 31, -329, 554].
+ * Replaced the CV-era identity matrix on 2026-09-29 (CAM-001).
  */
-static uint16_t _calibration_mt_absolute_ls_d50_ccm[] = {256, 0, 0, 0, 256, 0, 0, 0, 256};
+static uint16_t _calibration_mt_absolute_ls_d50_ccm[] = {585, 33144, 47, 32907, 534, 32907, 31, 33097, 554};
 
 // CALIBRATION_SHADING_LS_A_R
 /* *** PLACEHOLDER -- NEEDS A REAL MEASUREMENT ON HARDWARE. ***
@@ -870,7 +830,7 @@ static uint32_t _calibration_ca_filter_mem[] = {0x00008000, 0x000380fd, 0x00077e
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * These describe the AWB colour-temperature estimator's rg/bg grid. They only
  * matter when the userspace AWB algorithm is running and free to move the white
- * balance. This build pins white balance (CALIBRATION_STATIC_WB, identity CCM),
+ * balance. This build fixes white balance (CALIBRATION_STATIC_WB x manual gains, no AWB loop),
  * because an AWB step between the pre-shot and post-shot frame would show up as
  * a full-frame delta and swamp the real one. Nothing reads these in anger; they
  * are here because _GET_LUT_PTR() spins forever on a NULL table.

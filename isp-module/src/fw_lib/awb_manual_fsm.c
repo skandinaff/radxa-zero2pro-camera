@@ -168,6 +168,7 @@ void AWB_fsm_init( void *fsm, fsm_init_param_t *init_param )
     p_fsm->p_fsm_mgr = init_param->p_fsm_mgr;
 
     AWB_fsm_clear( p_fsm );
+    p_fsm->wb_applied = 0;
 
     awb_init( p_fsm );
     awb_coeffs_write( p_fsm );
@@ -313,6 +314,19 @@ uint8_t AWB_fsm_process_event( AWB_fsm_t *p_fsm, event_id_t event_id )
     default:
         break;
     case event_id_frame_end:
+        /* Without the userspace 3A daemon, event_id_awb_result_ready never
+         * arrives, so CALIBRATION_STATIC_WB and the manual red/blue gains
+         * (SYSTEM_AWB_RED_GAIN/BLUE_GAIN) would never reach the WB registers.
+         * Apply them here: once after init, and again whenever the manual
+         * gains differ from the ones last normalised (awb_normalise() records
+         * them in rg_coef/bg_coef). The CMOS FSM writes wb_log2 to hardware.
+         * Khadas solves the same gap with acamera_3aalg_preset() at init. */
+        if ( !p_fsm->wb_applied ||
+             p_fsm->rg_coef != ACAMERA_FSM2CTX_PTR( p_fsm )->stab.global_awb_red_gain ||
+             p_fsm->bg_coef != ACAMERA_FSM2CTX_PTR( p_fsm )->stab.global_awb_blue_gain ) {
+            awb_normalise( p_fsm );
+            p_fsm->wb_applied = 1;
+        }
         AWB_request_interrupt( p_fsm, ACAMERA_IRQ_MASK( ACAMERA_IRQ_AWB_STATS ) );
         b_event_processed = 1;
 
@@ -327,6 +341,7 @@ uint8_t AWB_fsm_process_event( AWB_fsm_t *p_fsm, event_id_t event_id )
     case event_id_awb_result_ready:
         awb_update_ccm( p_fsm );
         awb_normalise( p_fsm );
+        p_fsm->wb_applied = 1;
         fsm_raise_event( p_fsm, event_id_WB_matrix_ready );
         b_event_processed = 1;
         break;

@@ -103,6 +103,11 @@ struct _AWB_fsm_t {
 
     uint32_t pre_result_gain_frame_id;
     uint32_t cur_result_gain_frame_id;
+
+    /* Set once awb_normalise() has run. There is no userspace 3A daemon on
+     * Birdcher, so nothing raises event_id_awb_result_ready; see
+     * AWB_fsm_process_event(). */
+    uint8_t wb_applied;
 };
 
 

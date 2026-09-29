@@ -1432,6 +1432,13 @@ uint8_t system_awb_red_gain( acamera_fsm_mgr_t *instance, uint32_t value, uint8_
         *ret_value = ACAMERA_MGR2CTX_PTR( instance )->stab.global_awb_red_gain;
         return SUCCESS;
     } else if ( direction == COMMAND_SET ) {
+        /* Birdcher: 256 = 1.0 on top of CALIBRATION_STATIC_WB (awb_normalise()
+         * converts with 8 fractional bits, not the 1.7 format described above).
+         * The V4L2 control uses -1 for "no manual override", which arrives as
+         * 0xFFFFFFFF; treat it, 0 and anything past the 12-bit WB register
+         * range as unity. Applied at the next frame end by the AWB FSM. */
+        if ( value == 0 || value > 4095 )
+            value = 256;
         ACAMERA_MGR2CTX_PTR( instance )
             ->stab.global_awb_red_gain = value;
         return SUCCESS;
@@ -1467,6 +1474,13 @@ uint8_t system_awb_blue_gain( acamera_fsm_mgr_t *instance, uint32_t value, uint8
         *ret_value = ACAMERA_MGR2CTX_PTR( instance )->stab.global_awb_blue_gain;
         return SUCCESS;
     } else if ( direction == COMMAND_SET ) {
+        /* Birdcher: 256 = 1.0 on top of CALIBRATION_STATIC_WB (awb_normalise()
+         * converts with 8 fractional bits, not the 1.7 format described above).
+         * The V4L2 control uses -1 for "no manual override", which arrives as
+         * 0xFFFFFFFF; treat it, 0 and anything past the 12-bit WB register
+         * range as unity. Applied at the next frame end by the AWB FSM. */
+        if ( value == 0 || value > 4095 )
+            value = 256;
         ACAMERA_MGR2CTX_PTR( instance )
             ->stab.global_awb_blue_gain = value;
         return SUCCESS;
