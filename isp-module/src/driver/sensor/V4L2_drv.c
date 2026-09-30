@@ -668,6 +668,17 @@ static void start_streaming( void *ctx )
 }
 
 
+/*
+ * The integration limit the bridge set at the last start_streaming(), for the
+ * V4L2 layer to publish as the range of sensor_integration_timet_set (see
+ * isp_v4l2_streamon). 0 before the first start.
+ */
+uint32_t sensor_v4l2_integration_limit( void )
+{
+    return s_ctx[0].param.integration_time_limit;
+}
+
+
 void sensor_deinit_v4l2( void *ctx )
 {
     sensor_context_t *p_ctx = ctx;

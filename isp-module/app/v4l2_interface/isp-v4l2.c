@@ -424,6 +424,36 @@ static inline bool isp_v4l2_is_q_busy( struct vb2_queue *queue, struct file *fil
     return queue->owner && queue->owner != file->private_data;
 }
 
+/*
+ * Publish the sensor's real integration limit as the range of
+ * sensor_integration_timet_set.
+ *
+ * The vendor control had a fixed maximum of 4000 lines. With the 50 Hz
+ * antiflicker flooring manual exposure to 1350-line (10 ms) steps, that made
+ * 2700 lines = 20 ms the longest reachable exposure. The imx415 at 30 fps
+ * allows 4492 lines = 33.25 ms. The bridge refreshes integration_time_limit
+ * from the sensor's EXPOSURE range at stream start (the frame length follows
+ * vertical_blanking), so the control follows it here.
+ * See docs/logs/2026-09-30-exposure-limit.
+ */
+/* src/driver/sensor/V4L2_drv.c */
+extern uint32_t sensor_v4l2_integration_limit( void );
+
+static void isp_v4l2_publish_integration_limit( isp_v4l2_dev_t *dev )
+{
+    struct v4l2_ctrl *c;
+    uint32_t limit = sensor_v4l2_integration_limit();
+
+    if ( limit == 0 )
+        return;
+    c = v4l2_ctrl_find( &dev->isp_v4l2_ctrl.ctrl_hdl_cst_ctrl,
+                        ISP_V4L2_CID_CUSTOM_SET_SENSOR_INTEGRATION_TIME );
+    if ( c == NULL )
+        return;
+    if ( v4l2_ctrl_modify_range( c, c->minimum, limit, c->step, c->default_value ) == 0 )
+        LOG( LOG_CRIT, "sensor_integration_timet_set range -1..%u", limit );
+}
+
 static int isp_v4l2_streamon( struct file *file, void *priv, enum v4l2_buf_type i )
 {
     isp_v4l2_dev_t *dev = video_drvdata( file );
@@ -480,6 +510,8 @@ static int isp_v4l2_streamon( struct file *file, void *priv, enum v4l2_buf_type 
     }
 
     atomic_add( 1, &dev->stream_on_cnt );
+
+    isp_v4l2_publish_integration_limit( dev );
 
     return rc;
 }
