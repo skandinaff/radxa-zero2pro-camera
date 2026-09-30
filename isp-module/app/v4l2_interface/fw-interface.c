@@ -2074,6 +2074,49 @@ int fw_intf_set_ae_compensation( int val )
     return isp_fw_do_set_ae_compensation( val );
 }
 
+/*
+ * V4L2_CID_POWER_LINE_FREQUENCY -> the firmware's antiflicker commands.
+ *
+ * Khadas exposes the same two commands as vendor controls
+ * (ISP_V4L2_CID_SYSTEM_ANTIFLICKER_ENABLE/_FREQUENCY, fw_intf_set_system_
+ * antiflicker_enable/_frequency in armisp-g12b); here they sit behind the
+ * standard menu so userspace needs nothing vendor-specific. The CMOS FSM
+ * re-reads both every frame: with antiflicker off, get_quantised_
+ * integration_time() stops flooring manual and AE exposures to 50/60 Hz
+ * half-periods, so any exposure up to the frame length is usable -- at the
+ * cost of rolling-shutter banding under mains-powered light.
+ */
+int fw_intf_set_power_line_frequency( int mode )
+{
+#if defined( TSYSTEM ) && defined( SYSTEM_ANTIFLICKER_ENABLE ) && defined( SYSTEM_ANTI_FLICKER_FREQUENCY )
+    uint32_t ret_val;
+    int result;
+
+    if ( !isp_started ) {
+        LOG( LOG_NOTICE, "ISP FW not inited yet" );
+        return -EBUSY;
+    }
+    if ( mode == V4L2_CID_POWER_LINE_FREQUENCY_50HZ || mode == V4L2_CID_POWER_LINE_FREQUENCY_60HZ ) {
+        result = acamera_command( TSYSTEM, SYSTEM_ANTI_FLICKER_FREQUENCY,
+                                  mode == V4L2_CID_POWER_LINE_FREQUENCY_50HZ ? 50 : 60,
+                                  COMMAND_SET, &ret_val );
+        if ( result == 0 )
+            result = acamera_command( TSYSTEM, SYSTEM_ANTIFLICKER_ENABLE, 1, COMMAND_SET, &ret_val );
+    } else {
+        result = acamera_command( TSYSTEM, SYSTEM_ANTIFLICKER_ENABLE, 0, COMMAND_SET, &ret_val );
+    }
+    if ( result ) {
+        LOG( LOG_ERR, "Failed to set power line frequency mode %d, ret_value: %d.", mode, result );
+        return -EIO;
+    }
+    LOG( LOG_CRIT, "antiflicker: %s", mode == V4L2_CID_POWER_LINE_FREQUENCY_50HZ ? "50 Hz" :
+                                      mode == V4L2_CID_POWER_LINE_FREQUENCY_60HZ ? "60 Hz" : "off" );
+    return 0;
+#else
+    return -EINVAL;
+#endif
+}
+
 int fw_intf_set_customer_sensor_digital_gain(uint32_t ctrl_val)
 {
     int rtn = -1;

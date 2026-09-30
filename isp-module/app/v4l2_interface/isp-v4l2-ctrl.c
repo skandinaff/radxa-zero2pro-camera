@@ -65,6 +65,9 @@ static int isp_v4l2_ctrl_s_ctrl_standard( struct v4l2_ctrl *ctrl )
     case V4L2_CID_COLORFX:
         ret = fw_intf_set_color_fx( ctrl->val );
         break;
+    case V4L2_CID_POWER_LINE_FREQUENCY:
+        ret = fw_intf_set_power_line_frequency( ctrl->val );
+        break;
     case V4L2_CID_HFLIP:
         ret = fw_intf_set_hflip( ctrl->val );
         break;
@@ -580,6 +583,11 @@ int isp_v4l2_ctrl_init( isp_v4l2_ctrl_t *ctrl )
                   1, 1000, 1, 33 );
     ADD_CTRL_STD( V4L2_CID_EXPOSURE_AUTO_PRIORITY,
                   0, 1, 1, 0 );
+    /* antiflicker: off / 50 Hz / 60 Hz (no "auto": there is no flicker
+     * detection). Default 50 Hz, matching the calibration (CMOS control). */
+    ADD_CTRL_STD_MENU( V4L2_CID_POWER_LINE_FREQUENCY,
+                       V4L2_CID_POWER_LINE_FREQUENCY_60HZ, 0x0,
+                       V4L2_CID_POWER_LINE_FREQUENCY_50HZ );
     /* white balance */
     ADD_CTRL_STD( V4L2_CID_AUTO_WHITE_BALANCE,
                   0, 1, 1, 1 );
