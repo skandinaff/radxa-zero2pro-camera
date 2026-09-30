@@ -88,6 +88,13 @@
 				clock-names = "cts_mipi_isp_clk",
 					      "cts_mipi_csi_phy_clk0";
 				link-device = <&isp_sc>;
+				/*
+				 * CAM-004: the lens is bound by the ISP's own root notifier
+				 * (main_kernel_juno_v4l2.c), not through the standard
+				 * lens-focus on the sensor: that path creates an ancillary
+				 * media link, which oopses without a media device.
+				 */
+				amlogic,lens-focus = <&vcm>;
 				status = "okay";
 
 				port {
@@ -153,7 +160,6 @@
 			imx415: camera-sensor@1a {
 				compatible = "sony,imx415";
 				reg = <0x1a>;
-				lens-focus = <&vcm>;
 				/*
 				 * Real CCF consumer of gen_clk (isp_clkc
 				 * output 6), not a fixed-clock stand-in: this

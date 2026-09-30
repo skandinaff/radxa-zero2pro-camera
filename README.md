@@ -399,8 +399,16 @@ unmodified mainline. Original work in `isp-clkc/`, `dtbo-loader/`, and
 
 ### CAM-004: manual DW9714 lens focus on VIM3
 
-The camera overlay registers `lens@c` on the camera AO I2C bus and associates
-it with IMX415 through `lens-focus`. Linux 6.18's mainline `dw9714` module
+The camera overlay registers `lens@c` on the camera AO I2C bus. The ISP node
+references it with `amlogic,lens-focus`, and `iv009_isp` binds it through a
+**separate root async notifier** that only creates the lens's subdev node.
+The standard `lens-focus` on the IMX415 node must **not** be used. It puts the
+lens on the sensor's sub-notifier, and 6.18's
+`v4l2_async_create_ancillary_links()` then creates an ancillary media link.
+With no media device on this ISP, that oopsed `imx415_probe` on the board
+(2026-09-30). A root notifier skips the link. The camera never waits for the
+lens: without dw9714 the lens notifier simply never completes. Linux 6.18's
+mainline `dw9714` module
 provides `focus_absolute` (0..1023) on its own V4L2 subdev. Discover both
 sensor (`imx415`) and lens (`dw9714`) from `/sys/class/video4linux/*/name`;
 probe order can change their device numbers. The vendor ISP SocLens/AF path
@@ -440,6 +448,7 @@ fdtoverlay -i /tmp/vim3-base.dtb -o /tmp/vim3-applied.dtb /tmp/vim3-camera.dtbo
 fdtget -t s /tmp/vim3-applied.dtb /soc/bus@ff800000/i2c@5000/lens@c compatible
 ```
 
-Expected compatible: `dongwoon,dw9714`. Verify the sensor's `lens-focus`
-equals the lens `phandle`, and the lens `vcc-supply` equals the
-`/imx415-avdd` phandle. This checks relocation and association, not hardware.
+Expected compatible: `dongwoon,dw9714`. Verify the ISP node's
+`amlogic,lens-focus` equals the lens `phandle`, that the sensor has **no**
+`lens-focus`, and that the lens `vcc-supply` equals the `/imx415-avdd`
+phandle. This checks relocation and association, not hardware.

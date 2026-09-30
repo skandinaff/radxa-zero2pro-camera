@@ -253,6 +253,89 @@ static const struct v4l2_async_notifier_operations acamera_notifier_ops = {
     .unbind = acamera_camera_async_unbind,
 };
 
+/* CAM-004: the DW9714 lens VCM (mainline dw9714.ko) gets its own root
+ * notifier on the same v4l2_device, found through the ISP node's
+ * "amlogic,lens-focus" phandle.
+ *
+ * Why not the standard "lens-focus" on the sensor node: that puts the lens
+ * on the sensor's sub-notifier, and v4l2_async_create_ancillary_links()
+ * (v4l2-async.c, 6.18) then calls media_create_ancillary_link() -- which
+ * dereferences NULL here because this ISP has no media device. That oopsed
+ * imx415_probe on the board (docs/logs/2026-09-30-cam004-oops in the
+ * superproject). For a root notifier (notifier->sd == NULL) the core only
+ * warns and creates no link.
+ *
+ * Why a separate notifier and not the camera's: the camera notifier's
+ * complete() waits for every connection, and its unbind() stops the ISP
+ * firmware for any non-IQ subdev. The lens must never gate or stop the
+ * camera: if dw9714 is absent or fails to probe, this notifier just never
+ * completes and the camera is exactly as before. The lens is never put in
+ * soc_subdevs[], so the firmware's own SocLens lookup is unchanged too.
+ *
+ * complete() only registers the missing subdev nodes:
+ * v4l2_device_register_subdev_nodes() skips subdevs that already have a
+ * devnode, so this adds /dev/v4l-subdevN for the lens alone. Its error path
+ * would also unregister the sensor's node, but that path is only reachable
+ * on allocation/registration failure; the result is logged, never returned,
+ * so the async core never unbinds anything because of the lens. */
+static struct v4l2_async_notifier lens_notifier;
+static int lens_notifier_registered;
+
+static int acamera_lens_async_complete( struct v4l2_async_notifier *notifier )
+{
+    int rc = v4l2_device_register_subdev_nodes( &v4l2_dev );
+
+    if ( rc )
+        LOG( LOG_CRIT, "lens: subdev node registration failed: %d", rc );
+    else
+        LOG( LOG_ERR, "lens: subdev node registered" );
+    return 0;
+}
+
+static const struct v4l2_async_notifier_operations acamera_lens_notifier_ops = {
+    .complete = acamera_lens_async_complete,
+};
+
+static void acamera_lens_notifier_register( struct platform_device *pdev )
+{
+    struct fwnode_handle *lens;
+    struct v4l2_async_connection *asc;
+    int rc;
+
+    lens = fwnode_find_reference( dev_fwnode( &pdev->dev ), "amlogic,lens-focus", 0 );
+    if ( IS_ERR( lens ) ) {
+        LOG( LOG_ERR, "lens: no amlogic,lens-focus reference, focus not available" );
+        return;
+    }
+
+    v4l2_async_nf_init( &lens_notifier, &v4l2_dev );
+    lens_notifier.ops = &acamera_lens_notifier_ops;
+    asc = v4l2_async_nf_add_fwnode( &lens_notifier, lens, struct v4l2_async_connection );
+    fwnode_handle_put( lens );
+    if ( IS_ERR( asc ) ) {
+        LOG( LOG_ERR, "lens: failed to add fwnode async subdev: %ld", PTR_ERR( asc ) );
+        v4l2_async_nf_cleanup( &lens_notifier );
+        return;
+    }
+
+    rc = v4l2_async_nf_register( &lens_notifier );
+    if ( rc ) {
+        LOG( LOG_ERR, "lens: notifier register failed: %d", rc );
+        v4l2_async_nf_cleanup( &lens_notifier );
+        return;
+    }
+    lens_notifier_registered = 1;
+}
+
+static void acamera_lens_notifier_unregister( void )
+{
+    if ( !lens_notifier_registered )
+        return;
+    v4l2_async_nf_unregister( &lens_notifier );
+    v4l2_async_nf_cleanup( &lens_notifier );
+    lens_notifier_registered = 0;
+}
+
 #endif
 
 void cache_flush(uint32_t buf_start, uint32_t buf_size)
@@ -832,6 +915,10 @@ static int32_t isp_platform_probe( struct platform_device *pdev )
 
     rc = v4l2_async_nf_register( &g_subdevs.notifier );
 
+    /* After the camera notifier: the lens never gates the camera. */
+    if ( rc == 0 )
+        acamera_lens_notifier_register( pdev );
+
     device_create_file(&pdev->dev, &dev_attr_reg);
     device_create_file(&pdev->dev, &dev_attr_dump_frame);
 
@@ -868,6 +955,7 @@ static void isp_platform_remove(struct platform_device *pdev)
     }
 
 #if V4L2_SOC_SUBDEV_ENABLE
+    acamera_lens_notifier_unregister();
     v4l2_async_nf_unregister( &g_subdevs.notifier );
     v4l2_async_nf_cleanup( &g_subdevs.notifier );
 #endif
