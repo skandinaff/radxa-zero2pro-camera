@@ -180,37 +180,27 @@ static uint8_t _calibration_ae_correction[] = {128, 128, 128, 128, 128, 128, 128
 static uint32_t _calibration_ae_exposure_correction[] = {6710, 15739, 15778, 23282, 56186, 500325, 632161, 1190074, 1406400, 2382765, 3295034, 5491142}; //500,157778,500325,632161,1406400,6046465 //23282 - Max Lab Exposure
 
 // ------------Noise reduction ----------------------//
-/* SOURCE: ARM reference shape, scaled down for this CV application.
- * x is log2(total gain) * 256, so row N is 2^N gain (noise_reduction_func.c:
- * log2_gain = total_gain >> (LOG2_GAIN_SHIFT - 8)).
- *
- * Sinter is the spatial denoiser. Its cost here is specific: it is an edge-aware
- * smoother, and a bullet hole in paper is a *small* dark blob -- exactly the
- * feature class a spatial denoiser treats as noise and erodes. Losing a few
- * pixels off the rim of every hole shifts the connected-component centroid and
- * shrinks the area, which is the measurement being taken.
- *
- * Not set to zero, though, and that is deliberate. With sinter fully off, the
- * per-pixel noise at high analog gain (this sensor goes to 30 dB) puts isolated
- * pixels on the wrong side of a global Otsu threshold, which fragments the paper
- * region into speckle and gives connected-components thousands of one-pixel
- * blobs to sift. A little smoothing is cheaper than that cleanup.
- *
- * The compromise is ARM's gain-dependent shape (which is the right shape -- noise
- * does grow with gain) at roughly 30% of its strength, and 40% for strength1.
- * The per-row ARM reference values are kept in trailing comments so the scaling
- * is auditable and reversible. If holes come out undersized, drop these further;
- * if the threshold speckles, raise them.
+/*
+ * CAM-003 (2026-09-30): the spatial denoise (sinter), sharpening, chroma-noise
+ * (CNR), defect-pixel and demosaic noise tables marked "Khadas IMX415" below
+ * are copied verbatim from the pinned Khadas reference, replacing the Radxa CV
+ * set (weak denoise, sharpening off). Birdcher streams a picture for people:
+ * at the 24-28 dB gains used indoors, the CV set left visible noise. The rows
+ * are indexed by gain in 6 dB steps; the tables are sized by sizeof, so the
+ * Khadas row counts carry over. Temper (temporal denoise) stays off: this
+ * board provides no Temper frame buffers ("Temper is disabled" at boot).
  */
+/* CALIBRATION_SINTER_STRENGTH: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_sinter_strength[][2] = {
-    {0 * 256, 11},  /* ARM ref 35 */
-    {1 * 256, 13},  /* ARM ref 43 */
-    {2 * 256, 16},  /* ARM ref 53 */
-    {3 * 256, 20},  /* ARM ref 65 */
-    {4 * 256, 20},  /* ARM ref 65 */
-    {5 * 256, 21},  /* ARM ref 70 */
-    {6 * 256, 23},  /* ARM ref 78 */
-    {7 * 256, 25}}; /* ARM ref 82 */
+    {0 * 256, 0},
+    {1 * 256, 0},
+    {2 * 256, 0},
+    {3 * 256, 0},
+    {4 * 256, 0},
+    {5 * 256, 0},
+    {6 * 256, 0},
+    {7 * 256, 0},
+    {8 * 256, 0}}; /* ARM ref 82 */
 // ------------Noise reduction ----------------------//
 /* SOURCE: ARM reference (carried verbatim from the dummy set), value 0.
  * Modulates sinter strength by Iridix's local contrast output. Inert here
@@ -219,82 +209,53 @@ static uint16_t _calibration_sinter_strength[][2] = {
 static uint16_t _calibration_sinter_strength_MC_contrast[][2] = {
     {0 * 256, 0}};
 
-/* SOURCE: ARM reference shape, scaled down for this CV application.
- * x is log2(total gain) * 256, so row N is 2^N gain (noise_reduction_func.c:
- * log2_gain = total_gain >> (LOG2_GAIN_SHIFT - 8)).
- *
- * Sinter is the spatial denoiser. Its cost here is specific: it is an edge-aware
- * smoother, and a bullet hole in paper is a *small* dark blob -- exactly the
- * feature class a spatial denoiser treats as noise and erodes. Losing a few
- * pixels off the rim of every hole shifts the connected-component centroid and
- * shrinks the area, which is the measurement being taken.
- *
- * Not set to zero, though, and that is deliberate. With sinter fully off, the
- * per-pixel noise at high analog gain (this sensor goes to 30 dB) puts isolated
- * pixels on the wrong side of a global Otsu threshold, which fragments the paper
- * region into speckle and gives connected-components thousands of one-pixel
- * blobs to sift. A little smoothing is cheaper than that cleanup.
- *
- * The compromise is ARM's gain-dependent shape (which is the right shape -- noise
- * does grow with gain) at roughly 30% of its strength, and 40% for strength1.
- * The per-row ARM reference values are kept in trailing comments so the scaling
- * is auditable and reversible. If holes come out undersized, drop these further;
- * if the threshold speckles, raise them.
- */
+/* CALIBRATION_SINTER_STRENGTH1: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_sinter_strength1[][2] = {
-    {0 * 256, 62},  /* ARM ref 155 */
-    {1 * 256, 62},  /* ARM ref 155 */
-    {2 * 256, 50},  /* ARM ref 125 */
-    {3 * 256, 46},  /* ARM ref 115 */
-    {4 * 256, 46},  /* ARM ref 115 */
-    {5 * 256, 46},  /* ARM ref 115 */
-    {6 * 256, 34},  /* ARM ref  85 */
-    {7 * 256, 34}}; /* ARM ref  85 */ //255 4 int
+    {0*256, 40},
+    {1*256, 70},
+    {2*256, 90},
+    {3*256, 110},
+    {4*256, 130},
+    {5*256, 150},
+    {6*256, 170},
+    {7*256, 190},
+    {8*256, 220}}; /* ARM ref  85 */ //255 4 int
 
-/* SOURCE: ARM reference (carried verbatim from the dummy set).
- * These are sinter's internal thresholds and filter configuration rather than
- * an overall strength; the strength reduction above is applied through
- * CALIBRATION_SINTER_STRENGTH / _STRENGTH1, which is the documented knob. The
- * reference values are already small (thresh1 tops out at 5).
- */
+/* CALIBRATION_SINTER_THRESH1: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_sinter_thresh1[][2] = {
-    {0 * 256, 0},
-    {1 * 256, 0},
-    {2 * 256, 2},
-    {3 * 256, 3},
-    {4 * 256, 4},
-    {5 * 256, 4},
-    {6 * 256, 5}};
+    {0*256, 20},
+    {1*256, 30},
+    {2*256, 50},
+    {3*256, 60},
+    {4*256, 80},
+    {5*256, 100},
+    {6*256, 130},
+    {7*256, 160},
+    {8*256, 210}};
 
-/* SOURCE: ARM reference (carried verbatim from the dummy set).
- * These are sinter's internal thresholds and filter configuration rather than
- * an overall strength; the strength reduction above is applied through
- * CALIBRATION_SINTER_STRENGTH / _STRENGTH1, which is the documented knob. The
- * reference values are already small (thresh1 tops out at 5).
- */
+/* CALIBRATION_SINTER_THRESH4: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_sinter_thresh4[][2] = {
+    {0*256, 20},
+    {1*256, 40},
+    {2*256, 60},
+    {3*256, 90},
+    {4*256, 100},
+    {5*256, 140},
+    {6*256, 170},
+    {7*256, 200},
+    {8*256, 220}};
+
+/* CALIBRATION_SINTER_INTCONFIG: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
+static uint16_t _calibration_sinter_intConfig[][2] = {
     {0 * 256, 0},
     {1 * 256, 0},
     {2 * 256, 0},
-    {3 * 256, 5},
-    {4 * 256, 64},
-    {5 * 256, 64},
-    {6 * 256, 128}};
-
-/* SOURCE: ARM reference (carried verbatim from the dummy set).
- * These are sinter's internal thresholds and filter configuration rather than
- * an overall strength; the strength reduction above is applied through
- * CALIBRATION_SINTER_STRENGTH / _STRENGTH1, which is the documented knob. The
- * reference values are already small (thresh1 tops out at 5).
- */
-static uint16_t _calibration_sinter_intConfig[][2] = {
-    {0 * 256, 10},
-    {1 * 256, 10},
-    {2 * 256, 8},
-    {3 * 256, 8},
-    {4 * 256, 7},
-    {5 * 256, 5},
-    {6 * 256, 4}};
+    {3 * 256, 0},
+    {4 * 256, 0},
+    {5 * 256, 0},
+    {6 * 256, 0},
+    {7 * 256, 0},
+    {8 * 256, 0}};
 
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * Inert: rm_enable is 0 in CALIBRATION_SINTER_RADIAL_PARAMS below.
@@ -321,153 +282,78 @@ static uint16_t _calibration_sinter_radial_params[] = {
               //   = round(2147483648 / (1932^2 + 1096^2)) = round(2147483648/4933840)
 };
 
-/* SOURCE: ARM reference (carried verbatim from the dummy set).
- * These are sinter's internal thresholds and filter configuration rather than
- * an overall strength; the strength reduction above is applied through
- * CALIBRATION_SINTER_STRENGTH / _STRENGTH1, which is the documented knob. The
- * reference values are already small (thresh1 tops out at 5).
- */
+/* CALIBRATION_SINTER_SAD: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_sinter_sad[][2] = {
-    {0, 8},
-    {1 * 256, 8},
-    {2 * 256, 5},
-    {3 * 256, 5},
-    {4 * 256, 9},
-    {5 * 256, 11},
-    {6 * 256, 13}};
+    {0*256, 4},
+    {1*256, 6},
+    {2*256, 6},
+    {3*256, 10},
+    {4*256, 14},
+    {5*256, 18},
+    {6*256, 18},
+    {7*256, 18},
+    {8*256, 100}};
 // ------------ Sharpening and demosaic
-/* SOURCE: principled neutral choice for this CV application -- sharpening OFF.
- * All strengths zeroed across the whole gain range. The ARM reference values are
- * in the trailing comment on each table.
- *
- * Unsharp-mask sharpening works by adding a scaled high-pass of the image back
- * onto itself. At a step edge that produces overshoot on both sides -- a bright
- * halo outside and a dark halo inside. For a human that reads as "crisp". For
- * this pipeline it is poison twice over:
- *
- *   - Otsu + connected components sees the dark overshoot ring around the edge
- *     of the paper target, and around each hole, as additional dark pixels. Hole
- *     areas inflate and the target's fitted circle gains a spurious rim.
- *   - Frame differencing sees the halo move whenever anything moves, so a small
- *     registration error between the pre-shot and post-shot frame turns every
- *     high-contrast edge in the scene into a difference signal.
- *
- * There is no resolution being given up. Sharpening does not add information; it
- * only redistributes contrast at edges, and the CV stages measure geometry from
- * region membership, not from apparent edge acutance.
- */
+/* CALIBRATION_SHARP_ALT_D: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_sharp_alt_d[][2] = {
-    {0 * 256, 0},
-    {1 * 256, 0},
-    {2 * 256, 0},
-    {3 * 256, 0},
-    {4 * 256, 0},
-    {5 * 256, 0},
-    {6 * 256, 0},
-    {7 * 256, 0}}; /* ARM ref: 28 28 26 26 29 15 5 0 */
+    {0 * 256, 180},
+    {1 * 256, 180},
+    {2 * 256, 180},
+    {3 * 256, 180},
+    {4 * 256, 180},
+    {5 * 256, 180},
+    {6 * 256, 180},
+    {7 * 256, 180},
+    {8 * 256, 180}}; /* ARM ref: 28 28 26 26 29 15 5 0 */
 
-/* SOURCE: principled neutral choice for this CV application -- sharpening OFF.
- * All strengths zeroed across the whole gain range. The ARM reference values are
- * in the trailing comment on each table.
- *
- * Unsharp-mask sharpening works by adding a scaled high-pass of the image back
- * onto itself. At a step edge that produces overshoot on both sides -- a bright
- * halo outside and a dark halo inside. For a human that reads as "crisp". For
- * this pipeline it is poison twice over:
- *
- *   - Otsu + connected components sees the dark overshoot ring around the edge
- *     of the paper target, and around each hole, as additional dark pixels. Hole
- *     areas inflate and the target's fitted circle gains a spurious rim.
- *   - Frame differencing sees the halo move whenever anything moves, so a small
- *     registration error between the pre-shot and post-shot frame turns every
- *     high-contrast edge in the scene into a difference signal.
- *
- * There is no resolution being given up. Sharpening does not add information; it
- * only redistributes contrast at edges, and the CV stages measure geometry from
- * region membership, not from apparent edge acutance.
- */
+/* CALIBRATION_SHARP_ALT_UD: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_sharp_alt_ud[][2] = {
-    {0 * 256, 0},
-    {1 * 256, 0},
-    {2 * 256, 0},
-    {3 * 256, 0},
-    {4 * 256, 0},
-    {5 * 256, 0},
-    {6 * 256, 0},
-    {7 * 256, 0}}; /* ARM ref: 40 25 10 8 8 2 0 0 */
+    {0*256, 50},
+    {1*256, 50},
+    {2*256, 50},
+    {3*256, 50},
+    {4*256, 50},
+    {5*256, 50},
+    {6*256, 50},
+    {7*256, 50},
+    {8*256, 50}}; /* ARM ref: 40 25 10 8 8 2 0 0 */
 
 
-/* SOURCE: principled neutral choice for this CV application -- sharpening OFF.
- * All strengths zeroed across the whole gain range. The ARM reference values are
- * in the trailing comment on each table.
- *
- * Unsharp-mask sharpening works by adding a scaled high-pass of the image back
- * onto itself. At a step edge that produces overshoot on both sides -- a bright
- * halo outside and a dark halo inside. For a human that reads as "crisp". For
- * this pipeline it is poison twice over:
- *
- *   - Otsu + connected components sees the dark overshoot ring around the edge
- *     of the paper target, and around each hole, as additional dark pixels. Hole
- *     areas inflate and the target's fitted circle gains a spurious rim.
- *   - Frame differencing sees the halo move whenever anything moves, so a small
- *     registration error between the pre-shot and post-shot frame turns every
- *     high-contrast edge in the scene into a difference signal.
- *
- * There is no resolution being given up. Sharpening does not add information; it
- * only redistributes contrast at edges, and the CV stages measure geometry from
- * region membership, not from apparent edge acutance.
- */
+/* CALIBRATION_SHARP_ALT_DU: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_sharp_alt_du[][2] = {
-    {0 * 256, 0},
-    {1 * 256, 0},
-    {2 * 256, 0},
-    {3 * 256, 0},
-    {4 * 256, 0},
-    {5 * 256, 0},
-    {6 * 256, 0},
-    {7 * 256, 0}}; /* ARM ref: 70 70 65 55 29 17 5 0 */
+    {0 * 256, 180},
+    {1 * 256, 180},
+    {2 * 256, 180},
+    {3 * 256, 180},
+    {4 * 256, 180},
+    {5 * 256, 180},
+    {6 * 256, 180},
+    {7 * 256, 180},
+    {8 * 256, 180}}; /* ARM ref: 70 70 65 55 29 17 5 0 */
 
-/* SOURCE: principled neutral choice for this CV application -- sharpening OFF.
- * All strengths zeroed across the whole gain range. The ARM reference values are
- * in the trailing comment on each table.
- *
- * Unsharp-mask sharpening works by adding a scaled high-pass of the image back
- * onto itself. At a step edge that produces overshoot on both sides -- a bright
- * halo outside and a dark halo inside. For a human that reads as "crisp". For
- * this pipeline it is poison twice over:
- *
- *   - Otsu + connected components sees the dark overshoot ring around the edge
- *     of the paper target, and around each hole, as additional dark pixels. Hole
- *     areas inflate and the target's fitted circle gains a spurious rim.
- *   - Frame differencing sees the halo move whenever anything moves, so a small
- *     registration error between the pre-shot and post-shot frame turns every
- *     high-contrast edge in the scene into a difference signal.
- *
- * There is no resolution being given up. Sharpening does not add information; it
- * only redistributes contrast at edges, and the CV stages measure geometry from
- * region membership, not from apparent edge acutance.
- */
+/* CALIBRATION_SHARPEN_FR: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_sharpen_fr[][2] = {
-    {0 * 256, 0},
-    {1 * 256, 0},
-    {2 * 256, 0},
-    {3 * 256, 0},
-    {4 * 256, 0},
-    {5 * 256, 0},
-    {6 * 256, 0}}; /* ARM ref: 42 27 20 10 8 2 1 */
+    {0 * 256, 50},
+    {1 * 256, 45},
+    {2 * 256, 40},
+    {3 * 256, 35},
+    {4 * 256, 30},
+    {5 * 256, 25},
+    {6 * 256, 20},
+    {7 * 256, 15},
+    {8 * 256, 10}}; /* ARM ref: 42 27 20 10 8 2 1 */
 
-/* SOURCE: ARM reference (carried verbatim from the dummy set).
- * Offsets the demosaic noise-profile lookup with gain. Reference values are
- * already low (1..18) and demosaic quality reaches luma only weakly.
- */
+/* CALIBRATION_DEMOSAIC_NP_OFFSET: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_demosaic_np_offset[][2] = {
-    {0 * 256, 1},
-    {1 * 256, 1},
-    {2 * 256, 1},
-    {3 * 256, 3},
-    {4 * 256, 18},
-    {5 * 256, 18},
-    {6 * 256, 15}};
+    {0*256, 1},
+    {1*256, 1},
+    {2*256, 1},
+    {3*256, 1},
+    {4*256, 1},
+    {5*256, 1},
+    {6*256, 1},
+    {7*256, 1},
+    {8*256, 12}};
 
 
 /* SOURCE: ARM reference (carried verbatim from the dummy set), value 4096.
@@ -537,46 +423,30 @@ static uint16_t _calibration_stitching_ms_mov_mult[][2] = {
     {1 * 256, 128},
     {2 * 256, 100}};
 
-/* SOURCE: ARM reference (carried verbatim from the dummy set).
- * Defect-pixel correction, kept ON. Worth a note because "minimal processing"
- * might suggest disabling it: DPC replaces single pixels that differ wildly from
- * their same-colour neighbours. A bullet hole at this resolution is orders of
- * magnitude larger than one pixel, so holes are not at risk. Hot pixels, by
- * contrast, are point-like dark/bright outliers that fragment an Otsu-segmented
- * region and give connected-components junk to filter. The reference curve is
- * already conservative at low gain (threshold 4095 = effectively off at unity
- * gain) and tightens as gain rises, which is the right behaviour.
- */
+/* CALIBRATION_DP_SLOPE: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_dp_slope[][2] = {
-    {0 * 256, 170},
-    {1 * 256, 170},
-    {2 * 256, 170},
-    {3 * 256, 1800},
-    {4 * 256, 1911},
-    {5 * 256, 2200},
-    {6 * 256, 2400},
-};
+    {0*256, 4000},
+    {1*256, 4000},
+    {2*256, 4000},
+    {3*256, 4000},
+    {4*256, 4000},
+    {5*256, 4000},
+    {6*256, 4000},
+    {7*256, 4000},
+    {8*256, 4000}};
 
 
-/* SOURCE: ARM reference (carried verbatim from the dummy set).
- * Defect-pixel correction, kept ON. Worth a note because "minimal processing"
- * might suggest disabling it: DPC replaces single pixels that differ wildly from
- * their same-colour neighbours. A bullet hole at this resolution is orders of
- * magnitude larger than one pixel, so holes are not at risk. Hot pixels, by
- * contrast, are point-like dark/bright outliers that fragment an Otsu-segmented
- * region and give connected-components junk to filter. The reference curve is
- * already conservative at low gain (threshold 4095 = effectively off at unity
- * gain) and tightens as gain rises, which is the right behaviour.
- */
+/* CALIBRATION_DP_THRESHOLD: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_dp_threshold[][2] = {
-    {0 * 256, 4095},
-    {1 * 256, 312},
-    {2 * 256, 302},
-    {3 * 256, 110},
-    {4 * 256, 95},
-    {5 * 256, 85},
-    {6 * 256, 70},
-};
+    {0*256, 100},
+    {1*256, 100},
+    {2*256, 100},
+    {3*256, 100},
+    {4*256, 100},
+    {5*256, 100},
+    {6*256, 100},
+    {7*256, 100},
+    {8*256, 100}};
 
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
  * AWB tuning. Left at the reference deliberately rather than retuned: white
@@ -816,20 +686,17 @@ static uint16_t _calibration_exposure_ratio_adjustment[][2] = {
     {64 * 256, 256}};
 
 
-/* SOURCE: ARM reference (carried verbatim from the dummy set).
- * Chroma noise reduction. Operates on U/V only; invisible to a grayscale
- * consumer. Left alone rather than zeroed, since it costs nothing.
- */
+/* CALIBRATION_CNR_UV_DELTA12_SLOPE: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_cnr_uv_delta12_slope[][2] = {
-    {0 * 256, 1500}, //3800
+    {0 * 256, 1500},
     {1 * 256, 2000},
     {2 * 256, 2100},
     {3 * 256, 2100},
     {4 * 256, 3500},
     {5 * 256, 4100},
     {6 * 256, 5900},
-    {7 * 256, 6100},
-};
+    {7 * 256, 5900},
+    {8 * 256, 6100}};
 
 
 /* SOURCE: ARM reference (carried verbatim from the dummy set).
@@ -946,36 +813,17 @@ static uint32_t _scaler_v_filter[] = {
     0x1e1e0afa, 0x00fcfa0a, 0x1e1e09fa, 0x00fcfa0b, 0x1e1d09fa, 0x00fbfb0c, 0x1f1d08fa, 0x00fbfb0c, 0x201d07f9, 0x00fbfb0d, 0x201c07f9, 0x00fbfb0e, 0x201c06f9, 0x00fbfc0e, 0x211c05f9, 0x00fafc0f, 0x211b05f9, 0x00fafc10, 0x211a04f9, 0x00fafd11, 0x221a03f9, 0x00fafd11, 0x221803f9, 0x00fafe12, 0x221802f9, 0x00fafe13, 0x221802f9, 0x00f9ff13, 0x221701f9, 0x00f9ff15, 0x221701f9, 0x00f9ff15, 0x221600f9, 0x00f90016, 0x2215fff9, 0x00f90117, 0x2215fff9, 0x00f90117, 0x2213fff9, 0x00f90218, 0x2213fefa, 0x00f90218, 0x2212fefa, 0x00f90318, 0x2211fdfa, 0x00f9031a, 0x2111fdfa, 0x00f9041a, 0x2110fcfa, 0x00f9051b, 0x210ffcfa, 0x00f9051c, 0x200efcfb, 0x00f9061c, 0x200efbfb, 0x00f9071c, 0x200dfbfb, 0x00f9071d, 0x1f0cfbfb, 0x00fa081d, 0x1e0cfbfb, 0x00fa091d, 0x1e0bfafc, 0x00fa091e,
     0x0e0e0b06, 0x0002060b, 0x0e0d0b06, 0x0002070b, 0x0e0d0b06, 0x0002070b, 0x0e0d0b06, 0x0002070b, 0x0e0d0a06, 0x0002070c, 0x0e0d0a06, 0x0002070c, 0x0e0d0a05, 0x0003070c, 0x0e0d0a05, 0x0003070c, 0x0e0d0a05, 0x0003070c, 0x0e0d0905, 0x0003080c, 0x0e0d0905, 0x0003080c, 0x0e0d0905, 0x0003080c, 0x0e0d0905, 0x0003080c, 0x0e0d0904, 0x0004080c, 0x0e0d0904, 0x0004080c, 0x0e0c0904, 0x0004090c, 0x0e0c0904, 0x0004090c, 0x0e0c0904, 0x0004090c, 0x0e0c0804, 0x0004090d, 0x0e0c0804, 0x0004090d, 0x0e0c0803, 0x0005090d, 0x0e0c0803, 0x0005090d, 0x0e0c0803, 0x0005090d, 0x0e0c0803, 0x0005090d, 0x0e0c0703, 0x00050a0d, 0x0e0c0703, 0x00050a0d, 0x0e0c0703, 0x00050a0d, 0x0e0c0702, 0x00060a0d, 0x0e0c0702, 0x00060a0d, 0x0e0b0702, 0x00060b0d, 0x0e0b0702, 0x00060b0d, 0x0e0b0702, 0x00060b0d};
 
-/* SOURCE: principled neutral choice for this CV application -- sharpening OFF.
- * All strengths zeroed across the whole gain range. The ARM reference values are
- * in the trailing comment on each table.
- *
- * Unsharp-mask sharpening works by adding a scaled high-pass of the image back
- * onto itself. At a step edge that produces overshoot on both sides -- a bright
- * halo outside and a dark halo inside. For a human that reads as "crisp". For
- * this pipeline it is poison twice over:
- *
- *   - Otsu + connected components sees the dark overshoot ring around the edge
- *     of the paper target, and around each hole, as additional dark pixels. Hole
- *     areas inflate and the target's fitted circle gains a spurious rim.
- *   - Frame differencing sees the halo move whenever anything moves, so a small
- *     registration error between the pre-shot and post-shot frame turns every
- *     high-contrast edge in the scene into a difference signal.
- *
- * There is no resolution being given up. Sharpening does not add information; it
- * only redistributes contrast at edges, and the CV stages measure geometry from
- * region membership, not from apparent edge acutance.
- */
+/* CALIBRATION_SHARPEN_DS1: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
 static uint16_t _calibration_sharpen_ds1[][2] = {
-    {0 * 256, 0},
-    {1 * 256, 0},
-    {2 * 256, 0},
-    {3 * 256, 0},
-    {4 * 256, 0},
-    {5 * 256, 0},
-    {6 * 256, 0},
-    {7 * 256, 0},
-    {8 * 256, 0}}; /* ARM ref: 70 70 70 70 70 50 40 25 10 */
+    {0 * 256, 70},
+    {1 * 256, 70},
+    {2 * 256, 70},
+    {3 * 256, 70},
+    {4 * 256, 70},
+    {5 * 256, 50},
+    {6 * 256, 40},
+    {7 * 256, 25},
+    {8 * 256, 10}}; /* ARM ref: 70 70 70 70 70 50 40 25 10 */
 /* SOURCE: principled neutral choice for this CV application -- TEMPER OFF.
  * *** THIS IS THE MOST IMPORTANT SINGLE CHANGE IN THIS FILE. ***
  *

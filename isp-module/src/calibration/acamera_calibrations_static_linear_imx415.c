@@ -724,38 +724,8 @@ static uint16_t _calibration_awb_warming_ls_d75[] = {256, 256, 256};
 static uint16_t _calibration_awb_warming_ls_d50[] = {256, 256, 256};
 
 // CALIBRATION_NOISE_PROFILE
-/* SOURCE: photon-shot-noise model, endpoint carried from the ARM reference.
- * 128-entry LUT indexed by pixel intensity; general_func.c writes it into both
- * sinter_noise_profile_lut and temper_noise_profile_lut. The value is the
- * expected noise level at that intensity, which the denoisers scale their
- * thresholds by.
- *
- * A photon-limited sensor has sigma(S) = sqrt(sigma_read^2 + S/K), so the shape
- * is a square root in signal. That part is physics and is not negotiable:
- *     np[i] = 76 * sqrt((i + 2) / 129)
- * The +2 is a read-noise floor and the 76 endpoint is ARM's reference top value,
- * kept so that this LUT's interaction with the sinter/temper strength tables
- * stays in the range those tables were designed for.
- *
- * *** THE ABSOLUTE SCALE IS A PLACEHOLDER. *** The floor and the endpoint are
- * both borrowed, not measured: Sony publishes saturation signal (3895 digit min,
- * 12-bit) but not read noise or conversion gain for this part, and the vendor
- * headers do not document this LUT's units. A photon-transfer measurement fixes
- * both -- see docs/calibration-imx415.md ("Noise profile").
- *
- * Low stakes in practice: this build runs sinter at ~30% of the reference
- * strength and temper at zero, so the LUT's absolute scale barely reaches the
- * output. It matters if denoising is ever turned back up.
- */
-static uint8_t _calibration_noise_profile[] = {
-    9, 12, 13, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
-    28, 29, 30, 31, 31, 32, 33, 33, 34, 35, 35, 36, 37, 37, 38, 38,
-    39, 40, 40, 41, 41, 42, 42, 43, 43, 44, 44, 45, 45, 46, 46, 47,
-    47, 48, 48, 49, 49, 50, 50, 51, 51, 51, 52, 52, 53, 53, 54, 54,
-    54, 55, 55, 56, 56, 56, 57, 57, 58, 58, 58, 59, 59, 59, 60, 60,
-    61, 61, 61, 62, 62, 62, 63, 63, 63, 64, 64, 65, 65, 65, 66, 66,
-    66, 67, 67, 67, 68, 68, 68, 69, 69, 69, 70, 70, 70, 70, 71, 71,
-    71, 72, 72, 72, 73, 73, 73, 74, 74, 74, 75, 75, 75, 75, 76, 76};
+/* CALIBRATION_NOISE_PROFILE: Khadas IMX415 (khadas/common_drivers 3a11a86), CAM-003. */
+static uint8_t _calibration_noise_profile[] = {0,0,0,0,0,0,3,10,15,18,21,23,25,26,28,29,30,31,32,32,34,34,35,36,36,37,37,38,38,39,39,40,40,41,41,41,42,42,43,43,43,44,44,44,44,45,45,45,46,46,46,46,47,47,47,47,48,48,48,48,48,49,49,49,49,49,50,50,50,50,50,50,51,51,51,51,51,51,52,52,52,52,52,52,53,53,53,53,53,53,53,54,54,54,54,54,54,54,54,55,55,55,55,55,55,55,55,55,56,56,56,56,56,56,56,56,56,57,57,57,57,57,57,57,57,57,57,58};
 //  = {0,0,0,0,0,0,0,2,43,57,61,65,67,74,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85,85};
 
 // CALIBRATION_DEMOSAIC
