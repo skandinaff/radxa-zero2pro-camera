@@ -395,3 +395,51 @@ unmodified mainline. Original work in `isp-clkc/`, `dtbo-loader/`, and
 - [`github.com/khadas/linux`](https://github.com/khadas/linux) `khadas-vims-4.9.y` — vendor ISP driver
 - [`github.com/radxa/manifests`](https://github.com/radxa/manifests), [`radxa-pkg/radxa-overlays`](https://github.com/radxa-pkg/radxa-overlays)
 - [Radxa Zero 2 Pro schematic](https://dl.radxa.com/zero2pro/docs/hw/v1.2/radxa_zero_2_pro_v1.2_schematic.pdf)
+
+
+### CAM-004: manual DW9714 lens focus on VIM3
+
+The camera overlay registers `lens@c` on the camera AO I2C bus and associates
+it with IMX415 through `lens-focus`. Linux 6.18's mainline `dw9714` module
+provides `focus_absolute` (0..1023) on its own V4L2 subdev. Discover both
+sensor (`imx415`) and lens (`dw9714`) from `/sys/class/video4linux/*/name`;
+probe order can change their device numbers. The vendor ISP SocLens/AF path
+is not used.
+
+`vcc-supply` uses the existing always-on 2.9 V `imx415_avdd` stand-in. This
+models an already-powered on-module rail, within DW9714's 2.3–3.6 V supply
+range; it is not a measured regulator topology. It allows the mainline
+mandatory regulator lookup to succeed without depending on sensor streaming.
+
+Reference comparison: pinned Khadas `armisp-g12b/.../lens/dw9714_vcm.c`
+initialises position zero with slew nibble 8 (two-code steps, 81 us) and
+preserves that nibble on subsequent 10-bit position writes. Mainline uses
+10-bit position shifted by four with nibble zero, and software stepping on
+power transitions. The register position encoding agrees; slew differs.
+Keep mainline behaviour; the architect verifies motion/I2C errors on hardware.
+
+Offline build:
+
+```sh
+dtc -@ -I dts -O dtb -o /tmp/vim3-camera.dtbo overlays/vim3-camera-overlay.dts
+```
+
+The existing adapter/phy-csi duplicate unit address warning predates CAM-004.
+For the exact installed VIM3 base DTB, the architect copies
+`/boot/dtb/amlogic/meson-g12b-a311d-khadas-vim3.dtb` into a review artifact,
+then runs `fdtoverlay -i BASE.dtb -o /tmp/vim3-camera-applied.dtb
+/tmp/vim3-camera.dtbo`. Offline synthetic-base application checks are useful
+but do not replace this check. Installation/reboot is owned by the architect;
+keep a backup of `/boot/overlay-user/birdcher-vim3-camera.dtbo` first.
+
+A committed synthetic target/symbol fixture makes application reproducible:
+
+```sh
+dtc -@ -Wno-unit_address_vs_reg -I dts -O dtb -o /tmp/vim3-base.dtb overlays/tests/vim3-synthetic-base.dts
+fdtoverlay -i /tmp/vim3-base.dtb -o /tmp/vim3-applied.dtb /tmp/vim3-camera.dtbo
+fdtget -t s /tmp/vim3-applied.dtb /soc/bus@ff800000/i2c@5000/lens@c compatible
+```
+
+Expected compatible: `dongwoon,dw9714`. Verify the sensor's `lens-focus`
+equals the lens `phandle`, and the lens `vcc-supply` equals the
+`/imx415-avdd` phandle. This checks relocation and association, not hardware.

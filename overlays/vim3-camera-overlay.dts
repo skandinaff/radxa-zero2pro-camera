@@ -143,9 +143,17 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 
+			vcm: lens@c {
+				compatible = "dongwoon,dw9714";
+				reg = <0x0c>;
+				/* Always-on module rail stand-in; see CAM-004 in README. */
+				vcc-supply = <&imx415_avdd>;
+			};
+
 			imx415: camera-sensor@1a {
 				compatible = "sony,imx415";
 				reg = <0x1a>;
+				lens-focus = <&vcm>;
 				/*
 				 * Real CCF consumer of gen_clk (isp_clkc
 				 * output 6), not a fixed-clock stand-in: this

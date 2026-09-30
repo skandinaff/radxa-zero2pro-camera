@@ -1,0 +1,18 @@
+/* Synthetic target/symbol fixture, not the installed VIM3 DTB. */
+/dts-v1/;
+/ {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    gic: interrupt-controller { interrupt-controller; #interrupt-cells = <3>; #address-cells = <0>; };
+    soc {
+        bus@ff600000 {
+            bus@3c000 { system-controller@0 {}; };
+        };
+        bus@ff800000 {
+            i2c@5000 {
+                #address-cells = <1>; #size-cells = <0>;
+                gpio_expander: gpio@20 { reg = <0x20>; gpio-controller; #gpio-cells = <2>; };
+            };
+        };
+    };
+};
