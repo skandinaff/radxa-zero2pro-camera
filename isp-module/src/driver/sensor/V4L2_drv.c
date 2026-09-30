@@ -633,6 +633,30 @@ static void start_streaming( void *ctx )
      */
     sensor_set_iface( &supported_modes[p_ctx->param.mode] );
 
+    /*
+     * The frame rate is set through the imx415's vertical_blanking, which
+     * resizes its EXPOSURE range but never reaches this bridge. Without this
+     * the integration limit stays at the 60 fps frame (2242 lines, 16.6 ms)
+     * however long the frame really is, and a 20 ms manual exposure at 30 fps
+     * is clamped to 2242 and then antiflicker-quantised down to 10 ms.
+     *
+     * Khadas IMX415_drv.c sensor_vmax_fps() does the same on its own frame
+     * rate path: integration_time_limit/max follow the new VMAX, while
+     * lines_per_second is left alone, since blanking does not change the
+     * line rate.
+     */
+    {
+        struct v4l2_ctrl *c = sensor_ctrl( p_ctx, V4L2_CID_EXPOSURE );
+
+        if ( c != NULL ) {
+            p_ctx->param.integration_time_max = c->maximum;
+            p_ctx->param.integration_time_limit = c->maximum;
+            p_ctx->param.integration_time_long_max = c->maximum;
+            p_ctx->param.day_light_integration_time_max = c->maximum;
+            LOG( LOG_CRIT, "imx415 integration limit %lld lines", c->maximum );
+        }
+    }
+
     rc = v4l2_subdev_call( p_ctx->sensor_sd, video, s_stream, 1 );
     if ( rc != 0 && rc != -ENOIOCTLCMD ) {
         LOG( LOG_CRIT, "Failed to start streaming. rc = %d", rc );
